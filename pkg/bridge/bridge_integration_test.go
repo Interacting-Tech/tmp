@@ -481,8 +481,8 @@ func TestEndToEnd_MachineTorqueFramesCrossOurServerUnchanged(t *testing.T) {
 	t.Cleanup(func() { _ = physB.Close() })
 	framesAtB := pumpFrames(physB)
 
-	bridgeA, upA := startTestBridge(t, cabinetA, ourServer, "cabinet-A", bridge.Config{}, bridge.UpstreamOptions{})
-	bridgeB, upB := startTestBridge(t, cabinetB, ourServer, "cabinet-B", bridge.Config{}, bridge.UpstreamOptions{})
+	bridgeA, upA := startTestBridge(t, cabinetA, ourServer.url, "cabinet-A", bridge.Config{}, bridge.UpstreamOptions{})
+	bridgeB, upB := startTestBridge(t, cabinetB, ourServer.url, "cabinet-B", bridge.Config{}, bridge.UpstreamOptions{})
 	waitUntil(t, 3*time.Second, func() bool {
 		return bridgeA.LocalClient().IsConnectedToServer() && bridgeB.LocalClient().IsConnectedToServer() &&
 			upA.IsConnected() && upB.IsConnected()
@@ -523,7 +523,7 @@ func TestMachineBridge_RivalFromOurServerReachesMachineAndClearsWhenOurServerGoe
 	frames := pumpFrames(phys)
 
 	const rivalTimeout = 300 * time.Millisecond
-	mb, up := startTestBridge(t, cabinet, ourServer, "cabinet-A", bridge.Config{},
+	mb, up := startTestBridge(t, cabinet, ourServer.url, "cabinet-A", bridge.Config{},
 		bridge.UpstreamOptions{RivalTimeout: rivalTimeout})
 	rivalSide := dialTestMachine(t, ourServer.url)
 	t.Cleanup(func() { _ = rivalSide.Close() })
@@ -566,7 +566,7 @@ func TestMachineBridge_RivalNotConnectedFrameFromOurServerClearsRival(t *testing
 	t.Cleanup(func() { _ = phys.Close() })
 	frames := pumpFrames(phys)
 
-	mb, up := startTestBridge(t, cabinet, ourServer, "cabinet-A", bridge.Config{},
+	mb, up := startTestBridge(t, cabinet, ourServer.url, "cabinet-A", bridge.Config{},
 		bridge.UpstreamOptions{RivalTimeout: -1})
 	rivalSide := dialTestMachine(t, ourServer.url)
 	t.Cleanup(func() { _ = rivalSide.Close() })
@@ -602,7 +602,7 @@ func TestMachineBridge_OnlyNewSamplesStillRefreshesOurServerWhileMachineIsIdle(t
 	t.Cleanup(func() { _ = phys.Close() })
 	_ = pumpFrames(phys)
 
-	mb, up := startTestBridge(t, cabinet, ourServer, "cabinet-A",
+	mb, up := startTestBridge(t, cabinet, ourServer.url, "cabinet-A",
 		bridge.Config{OnlyForwardNewSamples: true}, bridge.UpstreamOptions{})
 	waitUntil(t, 3*time.Second, func() bool {
 		return mb.LocalClient().IsConnectedToServer() && up.IsConnected()
@@ -640,14 +640,17 @@ func startTestCabinet(t *testing.T) *simulatedMachineServer {
 func startTestBridge(
 	t *testing.T,
 	cabinet *simulatedMachineServer,
-	ourServer *testCentralRelayServer,
+	serverURL string,
 	machineID string,
 	cfg bridge.Config,
 	upOpts bridge.UpstreamOptions,
 ) (*bridge.MachineBridge, *bridge.WebSocketServerClient) {
 	t.Helper()
-	upOpts.ServerURL = ourServer.url
-	upOpts.Headers = make(http.Header)
+	upOpts.ServerURL = serverURL
+	upOpts.Headers = upOpts.Headers.Clone()
+	if upOpts.Headers == nil {
+		upOpts.Headers = make(http.Header)
+	}
 	upOpts.Headers.Set("X-Machine-ID", machineID)
 	up, err := bridge.NewWebSocketServerClient(upOpts)
 	if err != nil {
