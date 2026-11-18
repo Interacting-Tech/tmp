@@ -76,6 +76,32 @@ func TestMachineTorqueFrame_ForwardedBothWaysWithSameFieldsAndValues(t *testing.
 	}
 }
 
+func TestParseServerMessage_LoneZeroTorqueIsTheSection44DisconnectFrame(t *testing.T) {
+	for _, raw := range []string{
+		`{"data":{}}`,
+		`{"data":{"opponent_torque":-0.0}}`,
+		`{"data":{"machine_torque":-0.0}}`,
+		// A field with an unexpected type sends decoding through the per-field fallback path.
+		`{"data":{"machine_torque":"-0.0"}}`,
+	} {
+		msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false, "", true)
+		if raw == `{"data":{"machine_torque":"-0.0"}}` {
+			if !ok || msg.Kind != protocol.InboundTelemetry || !msg.Telemetry.HasMachineTelemetry {
+				t.Errorf("%s: a non-numeric machine_torque is not the disconnect frame, got %+v", raw, msg)
+			}
+			continue
+		}
+		if !ok || msg.Kind != protocol.InboundTelemetry || msg.Telemetry.HasMachineTelemetry {
+			t.Errorf("%s: expected a machine-disconnected frame, got %+v", raw, msg)
+		}
+	}
+
+	msg, ok := protocol.ParseServerMessage([]byte(`{"data":{"machine_torque":0,"hand":"left"}}`), "", 0, false, "", true)
+	if !ok || !msg.Telemetry.HasMachineTelemetry {
+		t.Errorf("a zero machine_torque next to other machine fields is machine telemetry, got %+v", msg)
+	}
+}
+
 func TestMachineTorqueFrame_DropsLegacySignRuleArtifactKeepsRealTorqueFields(t *testing.T) {
 	withArtifact := strings.Replace(machineTorqueFrame,
 		`"machine_torque": -12.5,`, `"machine_torque": -12.5, "opponent_torque": -0.0,`, 1)
@@ -209,6 +235,8 @@ func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
 		`{"data":{"is_connected":false,"client_id":2,"last_message_timestamp":86400123}}`,
 		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}`,
 		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123,"opponent_torque":-0.0}}`,
+		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123,"machine_torque":-0.0}}`,
+		`{"data":{"machine_torque":-0.0}}`,
 		// A field with an unexpected type sends decoding through the per-field fallback path.
 		`{"data":{"is_connected":false,"timeStamp":"late"}}`,
 		`{"data":{"client_id":"2","last_message_timestamp":86400123}}`,
@@ -220,7 +248,8 @@ func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
 
 	for _, raw := range []string{
 		`{"data":{"multiplayer_state":"MULTIPLAYER_SM_READY","is_connected":true,"client_id":2}}`,
-		`{"data":{"machine_torque":0,"is_connected":true}}`,
+		`{"data":{"machine_torque":0,"position":0,"is_connected":true}}`,
+		`{"data":{"machine_torque":-2.5}}`,
 		`{"data":{"torque":0,"opponent_torque":0}}`,
 	} {
 		if rival, ok := protocol.ParseRivalEnvelope([]byte(raw)); !ok || rival == nil {

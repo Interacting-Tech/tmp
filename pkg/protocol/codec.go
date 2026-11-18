@@ -330,10 +330,15 @@ func isEmptyOrDisconnectDTO(dto *wireTelemetryDTO, topKeys int) bool {
 	if topKeys == 0 {
 		return true
 	}
-	if topKeys == 1 && dto.OpponentTorque != nil && *dto.OpponentTorque == 0 {
+	// Section 4.4: the sign rule leaves a lone zero torque in the otherwise empty object.
+	if topKeys == 1 && (isZero(dto.OpponentTorque) || isZero(dto.MachineTorque)) {
 		return true
 	}
 	return false
+}
+
+func isZero(v *float64) bool {
+	return v != nil && *v == 0
 }
 
 // rivalAbsentDTO extends isEmptyOrDisconnectDTO to relayed rival frames, which may also carry the
@@ -347,7 +352,8 @@ func rivalAbsentDTO(dto *wireTelemetryDTO, topKeys int) bool {
 		dto.IsConnected != nil,
 		dto.ClientID != nil,
 		dto.LastMessageTimestamp != nil,
-		dto.OpponentTorque != nil && *dto.OpponentTorque == 0,
+		isZero(dto.OpponentTorque),
+		isZero(dto.MachineTorque),
 	} {
 		if present {
 			nonData++
@@ -810,15 +816,16 @@ func isEmptyOrDisconnectMap(m map[string]json.RawMessage) bool {
 	if len(m) == 0 {
 		return true
 	}
-	if len(m) == 1 {
-		if raw, ok := m["opponent_torque"]; ok {
-			var v float64
-			if err := json.Unmarshal(raw, &v); err == nil && v == 0 {
-				return true
-			}
-		}
+	return len(m) == 1 && (isZeroRaw(m, "opponent_torque") || isZeroRaw(m, "machine_torque"))
+}
+
+func isZeroRaw(m map[string]json.RawMessage, key string) bool {
+	raw, ok := m[key]
+	if !ok {
+		return false
 	}
-	return false
+	var v float64
+	return json.Unmarshal(raw, &v) == nil && v == 0
 }
 
 // rivalAbsentMap is rivalAbsentDTO for the per-field fallback decode.
@@ -835,9 +842,8 @@ func rivalAbsentMap(m map[string]json.RawMessage) bool {
 			nonData++
 		}
 	}
-	if raw, ok := m["opponent_torque"]; ok {
-		var v float64
-		if err := json.Unmarshal(raw, &v); err == nil && v == 0 {
+	for _, k := range [...]string{"opponent_torque", "machine_torque"} {
+		if isZeroRaw(m, k) {
 			nonData++
 		}
 	}
