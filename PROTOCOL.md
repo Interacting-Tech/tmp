@@ -36,8 +36,7 @@ Each message is a JSON object with **one top-level key**, whose value is the tel
     "hand": "right",
     "multiplayer_state": "MULTIPLAYER_SM_RUN",
     "single_player_state": "",
-    "torque": 12.5,
-    "opponent_torque": 10.2,
+    "machine_torque": 10.2,
     "position": 3.1,
     "velocity": -0.4,
     "left_limit": -45.0,
@@ -58,12 +57,10 @@ Each message is a JSON object with **one top-level key**, whose value is the tel
 |---|---|---|---|
 | `MAC_address` | string | `""` | Stored and relayed. Not used to identify the machine. |
 | `player_id` | string | `""` | Stored and relayed. |
-| `server_player_id` | string | keeps last value | The machine sends this only in every 50th message. |
 | `hand` | string | `""` | `"left"` or `"right"`, lowercase. Used for the torque sign rule in section 4.3. |
 | `multiplayer_state` | string | `""` | Drives the match state machine. See section 5. |
 | `single_player_state` | string | `""` | Stored and relayed. Not used by the server. |
-| `torque` | number | `0.0` | Stored and relayed. |
-| `opponent_torque` | number | `0.0` | Relayed; sign may be flipped. See section 4.3. |
+| `machine_torque` | number | `0.0` | Relayed; sign may be flipped. See section 4.3. |
 | `position` | number | `0.0` | Stored and relayed. |
 | `velocity` | number | `0.0` | Stored and relayed. |
 | `left_limit` | number | `0.0` | Stored and relayed. |
@@ -72,8 +69,6 @@ Each message is a JSON object with **one top-level key**, whose value is the tel
 | `timeStamp` | unsigned integer | `0` | The machine's own clock. Stored and relayed. |
 
 The server does not define or check units, and does no arithmetic on the numbers other than the sign flip on `opponent_torque`. Any extra fields in the telemetry object are kept and relayed unchanged.
-
-Current machine firmware sends the handle torque as `machine_torque` (number) instead of `torque` and `opponent_torque`. The server treats it as an extra field: it is relayed unchanged and its sign is never flipped. Because the server still applies the section 4.3 rule to the missing `opponent_torque`, a machine can receive `"opponent_torque": -0.0` next to the opponent's `machine_torque` when the hands differ.
 
 `multiplayer_state` values the server recognises:
 
@@ -142,8 +137,7 @@ Each connected machine receives the **other** machine's stored telemetry:
     "hand": "left",
     "multiplayer_state": "MULTIPLAYER_SM_RUN",
     "single_player_state": "",
-    "torque": 10.2,
-    "opponent_torque": -12.5,
+    "machine_torque": -12.5,
     "position": -3.1,
     "velocity": 0.4,
     "left_limit": -45.0,
