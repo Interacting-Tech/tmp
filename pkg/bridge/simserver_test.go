@@ -20,7 +20,10 @@ import (
 //   - Pairs exactly 2 machines (3rd accepted on socket and ignored)
 //   - Runs a 1ms main loop reading newest message per slot and running the match state machine
 //   - Broadcasts opponent telemetry every 10ms with is_connected, client_id, last_message_timestamp,
-//     and the section 4.3/4.4 opponent_torque sign flip (including -0.0 when remaining hand is "left")
+//     and the section 4.3/4.4 torque sign flip (including -0.0 when remaining hand is "left")
+//
+// The sign flip applies to opponent_torque, as in the first PROTOCOL.md revision, unless
+// UseSignRuleField selects machine_torque, as in the current one.
 type simulatedMachineServer struct {
 	bindIP            net.IP
 	port              int
@@ -34,6 +37,7 @@ type simulatedMachineServer struct {
 	matchState        string
 	postMatchEntered  time.Time
 	nextClientID      atomic.Int32
+	signRuleField     string
 	stopLoop          chan struct{}
 	loopDone          chan struct{}
 }
@@ -76,6 +80,7 @@ func startSimulatedMachineServer(bindIP net.IP, postMatchDuration time.Duration)
 		slots:             [2]*simSlot{{}, {}},
 		allConns:          make(map[*simConn]struct{}),
 		matchState:        protocol.ServerIdle,
+		signRuleField:     "opponent_torque",
 		stopLoop:          make(chan struct{}),
 		loopDone:          make(chan struct{}),
 	}
@@ -109,6 +114,13 @@ func startSimulatedMachineServer(bindIP net.IP, postMatchDuration time.Duration)
 
 func (s *simulatedMachineServer) EndpointURL() string {
 	return fmt.Sprintf("ws://%s:%d/ws?role=machine", s.bindIP.String(), s.port)
+}
+
+// UseSignRuleField selects the telemetry field the section 4.3 sign rule is applied to.
+func (s *simulatedMachineServer) UseSignRuleField(field string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signRuleField = field
 }
 
 func (s *simulatedMachineServer) Port() int {
@@ -288,10 +300,10 @@ func (s *simulatedMachineServer) mainLoop() {
 				c1 = s.slots[0].conn
 				c2 = s.slots[1].conn
 				if c1 != nil {
-					m1 = buildRelayedJSON(s.slots[1], flip)
+					m1 = buildRelayedJSON(s.slots[1], flip, s.signRuleField)
 				}
 				if c2 != nil {
-					m2 = buildRelayedJSON(s.slots[0], flip)
+					m2 = buildRelayedJSON(s.slots[0], flip, s.signRuleField)
 				}
 				s.mu.Unlock()
 
@@ -337,10 +349,10 @@ func (s *simulatedMachineServer) consumeNewest(slot *simSlot, nowMs int64) {
 	slot.stored = inner
 }
 
-func buildRelayedJSON(source *simSlot, flip bool) string {
+func buildRelayedJSON(source *simSlot, flip bool, signRuleField string) string {
 	if source.conn == nil || source.stored == nil {
 		if flip {
-			return `{"data":{"opponent_torque":-0.0}}`
+			return `{"data":{"` + signRuleField + `":-0.0}}`
 		}
 		return `{"data":{}}`
 	}
@@ -352,14 +364,14 @@ func buildRelayedJSON(source *simSlot, flip bool) string {
 
 	if flip {
 		oppTorque := 0.0
-		if raw, ok := cp["opponent_torque"]; ok {
+		if raw, ok := cp[signRuleField]; ok {
 			_ = json.Unmarshal(raw, &oppTorque)
 		}
 		if oppTorque == 0 {
-			cp["opponent_torque"] = json.RawMessage(`-0.0`)
+			cp[signRuleField] = json.RawMessage(`-0.0`)
 		} else {
 			b, _ := json.Marshal(-oppTorque)
-			cp["opponent_torque"] = b
+			cp[signRuleField] = b
 		}
 	}
 

@@ -30,6 +30,8 @@ func newPair() (s *Server, a, b *machine) {
 		m.out.wake = make(chan struct{}, 1)
 	}
 	a.rival, b.rival = b, a
+	bt := &battle{state: protocol.ServerIdle}
+	a.battle, b.battle = bt, bt
 	return s, a, b
 }
 

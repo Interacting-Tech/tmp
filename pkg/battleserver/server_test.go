@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Interacting-Tech/tmp/pkg/battleserver"
+	"github.com/Interacting-Tech/tmp/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -34,7 +35,9 @@ const bridgeFrame = `{
   }
 }`
 
-const bridgeFrameRelayed = `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45,"right_limit":45,"peak_force":28,"timeStamp":123456790}}`
+// bridgeFrameRelayed is bridgeFrame as the rival's bridge receives it: the same machine fields,
+// with the left-handed player's machine_torque negated.
+const bridgeFrameRelayed = `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":12.5,"position":-3.1,"velocity":0.4,"left_limit":-45,"right_limit":45,"peak_force":28,"timeStamp":123456790}}`
 
 const rivalGone = `{"data":{}}`
 
@@ -136,6 +139,38 @@ func TestThirdMachine_WaitsUntilAMachineIsFree(t *testing.T) {
 	b.send(t, playerFrame("from-B"))
 	if got := c.next(t); got != playerFrameRelayed("from-B") {
 		t.Fatalf("C received %s, want B's telemetry", got)
+	}
+}
+
+// A battle's result belongs to that battle: the winner's next rival must not be told it lost.
+func TestRivalLeaves_ResultOfTheFinishedBattleIsNotSentToTheNextRival(t *testing.T) {
+	url := startServer(t, battleserver.Options{PostMatchDuration: time.Hour})
+	a := connect(t, url, "cabinet-A", "")
+	b := connect(t, url, "cabinet-B", "")
+	waitPaired(t, a, b)
+	waitPaired(t, b, a)
+
+	frame := func(state string, position float64) string {
+		return fmt.Sprintf(`{"data":{"hand":"right","multiplayer_state":%q,"position":%v,"left_limit":-45,"right_limit":45}}`, state, position)
+	}
+	a.send(t, frame(protocol.StateReady, 0))
+	for !strings.Contains(b.next(t), protocol.StateReady) {
+	}
+	b.send(t, frame(protocol.StateReady, 0))
+	for !strings.Contains(a.next(t), protocol.StateReady) {
+	}
+	a.send(t, frame(protocol.StateRun, 45))
+	for !strings.Contains(b.next(t), protocol.StateGameOverWin) {
+	}
+
+	_ = b.ws.Close()
+	for a.next(t) != rivalGone {
+	}
+	c := connect(t, url, "cabinet-C", "")
+	stopFeed := a.feed(frame(protocol.StateRun, 0))
+	defer stopFeed()
+	if got := c.next(t); !strings.Contains(got, protocol.StateRun) {
+		t.Fatalf("C received %s from its new rival A, want A's state as A reported it", got)
 	}
 }
 

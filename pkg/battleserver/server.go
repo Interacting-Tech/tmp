@@ -1,9 +1,11 @@
 // Package battleserver is our central server. Machine bridges connect to it over WebSocket; it
 // pairs machines into battles and relays each machine's PROTOCOL.md telemetry to its rival.
 //
-// The battle itself (ready, start, win/lose) is run by each machine's local PROTOCOL.md server,
-// where the bridge stands in for the rival. This server only decides who fights whom and carries
-// the telemetry between them.
+// Each machine's local PROTOCOL.md server, where the bridge stands in for the rival, tells its
+// machine when to start and whether it won. This server follows the same match states
+// (PROTOCOL.md section 5) for each pair so that it can decide a battle itself: when a handle
+// reaches one of its position limits, the server reports the winner as having won and the loser as
+// having lost, and the local servers pass that on to their machines.
 package battleserver
 
 import (
@@ -44,6 +46,15 @@ type Options struct {
 	// MaxInboundBytes caps the size of a frame from a bridge (default: 64 KiB).
 	MaxInboundBytes int64
 
+	// PostMatchDuration is how long a decided battle stays decided before the pair can start
+	// another (default: 2s, as in PROTOCOL.md section 5).
+	PostMatchDuration time.Duration
+
+	// WinAtOppositeLimit reverses which position limit means victory. By default a machine wins
+	// when its handle reaches the limit on the side of its player's hand (right hand: right_limit,
+	// left hand: left_limit) and loses when it reaches the other limit.
+	WinAtOppositeLimit bool
+
 	// Logf receives connection and battle events (default: discarded).
 	Logf func(format string, args ...any)
 }
@@ -59,6 +70,9 @@ func (o Options) withDefaults() Options {
 	if out.MaxInboundBytes <= 0 {
 		out.MaxInboundBytes = 64 * 1024
 	}
+	if out.PostMatchDuration <= 0 {
+		out.PostMatchDuration = 2 * time.Second
+	}
 	if out.Logf == nil {
 		out.Logf = func(string, ...any) {}
 	}
@@ -69,12 +83,14 @@ func (o Options) withDefaults() Options {
 type Server struct {
 	opts     Options
 	upgrader websocket.Upgrader
+	now      func() time.Time
 
 	mu        sync.Mutex
 	closed    bool
 	machines  map[string]*machine
 	waiting   []*machine
 	anonymous uint64
+	scratch   []byte
 	sessions  sync.WaitGroup
 }
 
@@ -85,12 +101,23 @@ type machine struct {
 	done chan struct{}
 
 	// Guarded by Server.mu.
-	rival *machine
-	gone  bool
+	gone   bool
+	rival  *machine
+	battle *battle
+	// last is the machine's newest telemetry in its current battle, nil while the bridge has not
+	// sent any or has reported its machine gone.
+	last *protocol.MachineTelemetry
+	// declared is the result this server decided for the machine. While set it replaces
+	// multiplayer_state in what the rival receives.
+	declared string
+	// relayedState is the multiplayer_state the rival was last sent.
+	relayedState string
+}
 
-	// Owned by the machine's read goroutine.
-	lastState string
-	scratch   []byte
+// battle is the PROTOCOL.md section 5 match state of one pair of machines.
+type battle struct {
+	state          string
+	postMatchUntil time.Time
 }
 
 // New creates a Server.
@@ -98,6 +125,7 @@ func New(opts Options) *Server {
 	return &Server{
 		opts:     opts.withDefaults(),
 		upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096},
+		now:      time.Now,
 		machines: make(map[string]*machine),
 	}
 }
@@ -213,10 +241,11 @@ func (s *Server) detachLocked(m *machine) {
 	}
 
 	if rival := m.rival; rival != nil {
-		m.rival, rival.rival = nil, nil
+		m.leaveBattle()
+		rival.leaveBattle()
 		rival.out.putPriority(rivalGone)
 		s.waiting = append(s.waiting, rival)
-		s.opts.Logf("battle ended: %q left, %q is waiting for a rival", m.id, rival.id)
+		s.opts.Logf("%q left; %q is waiting for a rival", m.id, rival.id)
 	} else {
 		for i, w := range s.waiting {
 			if w == m {
@@ -235,8 +264,15 @@ func (s *Server) pairWaitingLocked() {
 		a, b := s.waiting[0], s.waiting[1]
 		s.waiting = s.waiting[2:]
 		a.rival, b.rival = b, a
-		s.opts.Logf("battle ready: %q vs %q", a.id, b.id)
+		bt := &battle{state: protocol.ServerIdle}
+		a.battle, b.battle = bt, bt
+		s.opts.Logf("paired %q with %q", a.id, b.id)
 	}
+}
+
+func (m *machine) leaveBattle() {
+	m.rival, m.battle, m.last = nil, nil, nil
+	m.declared, m.relayedState = "", ""
 }
 
 func (s *Server) readLoop(m *machine) {
@@ -270,20 +306,15 @@ func (s *Server) readLoop(m *machine) {
 // a command or anything this server did not understand.
 func (s *Server) handleFrame(m *machine, raw []byte) {
 	if telemetry, ok := protocol.ParseRivalEnvelope(raw); ok && telemetry != nil {
-		// A win/lose result must reach the rival even if it is slow to read; everything else is
-		// superseded by the next frame 10 ms later.
-		mustDeliver := protocol.IsTerminalMatchState(telemetry.MultiplayerState) &&
-			telemetry.MultiplayerState != m.lastState
-		m.lastState = telemetry.MultiplayerState
-		m.scratch = protocol.AppendMachineEnvelope(m.scratch[:0], telemetry, true, "")
-
 		s.mu.Lock()
-		if rival := m.rival; rival != nil {
-			if mustDeliver {
-				rival.out.putPriority(m.scratch)
-			} else {
-				rival.out.putLatest(m.scratch)
+		if m.rival != nil {
+			previousState := ""
+			if m.last != nil {
+				previousState = m.last.MultiplayerState
 			}
+			m.last = telemetry
+			s.advanceBattleLocked(m, previousState)
+			s.relayLocked(m)
 		}
 		s.mu.Unlock()
 		return
@@ -294,13 +325,146 @@ func (s *Server) handleFrame(m *machine, raw []byte) {
 	if !ok || parsed.Kind != protocol.InboundTelemetry || parsed.Telemetry == nil || parsed.Telemetry.HasMachineTelemetry {
 		return
 	}
-	m.lastState = ""
 
 	s.mu.Lock()
 	if rival := m.rival; rival != nil {
+		m.last, m.relayedState = nil, ""
+		if m.battle.state != protocol.ServerIdle {
+			s.opts.Logf("battle between %q and %q abandoned: machine %q is gone", m.id, rival.id, m.id)
+		}
+		m.battle.state = protocol.ServerIdle
+		m.declared, rival.declared = "", ""
 		rival.out.putPriority(rivalGone)
 	}
 	s.mu.Unlock()
+}
+
+// advanceBattleLocked runs the PROTOCOL.md section 5 match states for m's battle on m's newest
+// telemetry, and decides the battle when m's handle reaches a position limit.
+func (s *Server) advanceBattleLocked(m *machine, previousState string) {
+	b, rival := m.battle, m.rival
+	now := s.now()
+
+	if b.state == protocol.ServerPostMatch && !now.Before(b.postMatchUntil) {
+		b.state = protocol.ServerIdle
+		m.declared, rival.declared = "", ""
+	}
+
+	mine, theirs := m.last.MultiplayerState, ""
+	if rival.last != nil {
+		theirs = rival.last.MultiplayerState
+	}
+
+	// A machine that becomes ready again is asking for a new battle, so the one in progress ended
+	// without a result (for example, an operator stopped it on the machine's local server).
+	if b.state == protocol.ServerMidMatch && mine == protocol.StateReady && previousState != protocol.StateReady {
+		s.opts.Logf("battle between %q and %q abandoned: %q is ready for a new one", m.id, rival.id, m.id)
+		b.state = protocol.ServerWaiting
+	}
+
+	switch b.state {
+	case protocol.ServerIdle, protocol.ServerWaiting:
+		if mine == protocol.StateReady || theirs == protocol.StateReady {
+			b.state = protocol.ServerWaiting
+		}
+		if b.state == protocol.ServerWaiting && mine == protocol.StateReady && theirs == protocol.StateReady {
+			b.state = protocol.ServerMidMatch
+			s.opts.Logf("battle started: %q vs %q", m.id, rival.id)
+		}
+
+	case protocol.ServerMidMatch:
+		if protocol.IsTerminalMatchState(mine) {
+			b.state = protocol.ServerPostMatch
+			b.postMatchUntil = now.Add(s.opts.PostMatchDuration)
+			s.opts.Logf("battle decided: %q reported %s", m.id, mine)
+			return
+		}
+		// The handle may be anywhere before the machines are told to start, so a limit only
+		// counts while the machine reports that the battle is running.
+		if mine != protocol.StateRun {
+			return
+		}
+		won, limit := limitResult(m.last, s.opts.WinAtOppositeLimit)
+		if limit == "" {
+			return
+		}
+		winner, loser := m, rival
+		if !won {
+			winner, loser = rival, m
+		}
+		winner.declared, loser.declared = protocol.StateGameOverWin, protocol.StateGameOverLose
+		b.state = protocol.ServerPostMatch
+		b.postMatchUntil = now.Add(s.opts.PostMatchDuration)
+		s.opts.Logf("battle decided: %q (%s hand) reached its %s at position %v: %q wins, %q loses",
+			m.id, handName(m.last.Hand), limit, m.last.Position, winner.id, loser.id)
+
+		// m's bridge learns the result from the rival's telemetry; do not wait for its next frame.
+		if rival.last != nil {
+			s.relayLocked(rival)
+		}
+	}
+}
+
+// limitResult reports which position limit t's handle has reached ("" for none) and whether
+// reaching it means t's player won.
+func limitResult(t *protocol.MachineTelemetry, winAtOppositeLimit bool) (won bool, limit string) {
+	if !(t.LeftLimit < t.RightLimit) {
+		return false, "" // the machine reported no usable limits
+	}
+	atOwnSide := false
+	switch {
+	case t.Position <= t.LeftLimit:
+		limit = "left_limit"
+		atOwnSide = protocol.NormalizeHand(t.Hand) == protocol.HandLeft
+	case t.Position >= t.RightLimit:
+		limit = "right_limit"
+		atOwnSide = protocol.NormalizeHand(t.Hand) != protocol.HandLeft
+	default:
+		return false, ""
+	}
+	return atOwnSide != winAtOppositeLimit, limit
+}
+
+func handName(hand string) string {
+	if protocol.NormalizeHand(hand) == protocol.HandLeft {
+		return protocol.HandLeft
+	}
+	return protocol.HandRight
+}
+
+// relayLocked sends m's newest telemetry to its rival.
+func (s *Server) relayLocked(m *machine) {
+	out := *m.last
+	if m.declared != "" {
+		out.MultiplayerState = m.declared
+	} else if s.heldReadyLocked(m) {
+		out.MultiplayerState = protocol.StateReady
+	}
+	// The rival receives a left-handed player's torque with its sign reversed.
+	if out.HasMachineTorque && protocol.NormalizeHand(out.Hand) == protocol.HandLeft {
+		out.MachineTorque = protocol.SanitizeFloat(-out.MachineTorque)
+	}
+
+	// A win/lose result must reach the rival even if it is slow to read; everything else is
+	// superseded by the next frame 10 ms later.
+	mustDeliver := protocol.IsTerminalMatchState(out.MultiplayerState) && out.MultiplayerState != m.relayedState
+	m.relayedState = out.MultiplayerState
+
+	s.scratch = protocol.AppendMachineEnvelope(s.scratch[:0], &out, true, "")
+	if mustDeliver {
+		m.rival.out.putPriority(s.scratch)
+	} else {
+		m.rival.out.putLatest(s.scratch)
+	}
+}
+
+// heldReadyLocked reports whether m must still be shown to its rival as ready. A machine leaves
+// MULTIPLAYER_SM_READY as soon as its own local server starts it, but the rival's local server
+// starts the rival only while it sees both machines ready (PROTOCOL.md section 5). So once the
+// battle has started, m stays ready in the rival's eyes until the rival has started too.
+func (s *Server) heldReadyLocked(m *machine) bool {
+	return m.battle.state == protocol.ServerMidMatch &&
+		m.rival.last != nil && m.rival.last.MultiplayerState == protocol.StateReady
 }
 
 func (m *machine) writeLoop(writeTimeout time.Duration) {

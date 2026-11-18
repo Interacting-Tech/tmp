@@ -20,9 +20,10 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	var (
-		listen    = flag.String("listen", envOr("BATTLE_SERVER_LISTEN", ":9000"), "Address to listen on for machine bridges")
-		path      = flag.String("path", "/ws/machine", "URL path of the WebSocket endpoint that machine bridges connect to")
-		authToken = flag.String("auth-token", os.Getenv("OUR_SERVER_TOKEN"), "Bearer token every machine bridge must present (empty: anyone may connect)")
+		listen        = flag.String("listen", envOr("BATTLE_SERVER_LISTEN", ":9000"), "Address to listen on for machine bridges")
+		path          = flag.String("path", "/ws/machine", "URL path of the WebSocket endpoint that machine bridges connect to")
+		authToken     = flag.String("auth-token", os.Getenv("OUR_SERVER_TOKEN"), "Bearer token every machine bridge must present (empty: anyone may connect)")
+		oppositeLimit = flag.Bool("win-at-opposite-limit", false, "A player wins when the handle reaches the position limit opposite the hand in use (default: right hand wins at right_limit, left hand at left_limit)")
 	)
 	flag.Parse()
 
@@ -32,7 +33,8 @@ func main() {
 	}
 
 	battles := battleserver.New(battleserver.Options{
-		AuthToken: token,
+		AuthToken:          token,
+		WinAtOppositeLimit: *oppositeLimit,
 		Logf: func(format string, args ...any) {
 			log.Printf("[battle-server] "+format, args...)
 		},
