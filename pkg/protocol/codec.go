@@ -141,6 +141,8 @@ func MarshalMachineEnvelope(
 //     the alphabetically first key (ordinal byte order, section 3.1).
 //   - Applies section 3.2 defaults for missing fields.
 //   - Preserves any extra fields while stripping server-injected fields (section 4.2).
+//   - Rejects frames without rival machine data: empty or section 4.4 disconnect frames,
+//     "is_connected": false, and frames holding nothing but server-injected fields.
 func ParseRivalEnvelope(raw []byte) (*MachineTelemetry, bool) {
 	innerRaw, isCmd, ok := extractEnvelopeInner(raw, false)
 	if !ok || isCmd {
@@ -151,13 +153,13 @@ func ParseRivalEnvelope(raw []byte) (*MachineTelemetry, bool) {
 	if !ok {
 		// Fallback to permissive per-field map decode if a field had a non-standard type.
 		innerMap, mapOK := decodeStrictJSONObject(innerRaw)
-		if !mapOK || isEmptyOrDisconnectMap(innerMap) {
+		if !mapOK || rivalAbsentMap(innerMap) {
 			return nil, false
 		}
 		return decodeTelemetryMap(innerMap), true
 	}
 
-	if isEmptyOrDisconnectDTO(&dto, topKeys) {
+	if rivalAbsentDTO(&dto, topKeys) {
 		return nil, false
 	}
 
@@ -332,6 +334,26 @@ func isEmptyOrDisconnectDTO(dto *wireTelemetryDTO, topKeys int) bool {
 		return true
 	}
 	return false
+}
+
+// rivalAbsentDTO extends isEmptyOrDisconnectDTO to relayed rival frames, which may also carry the
+// fields a server adds (section 4.2) around an empty or section 4.4 disconnect object.
+func rivalAbsentDTO(dto *wireTelemetryDTO, topKeys int) bool {
+	if dto.IsConnected != nil && !*dto.IsConnected {
+		return true
+	}
+	nonData := 0
+	for _, present := range [...]bool{
+		dto.IsConnected != nil,
+		dto.ClientID != nil,
+		dto.LastMessageTimestamp != nil,
+		dto.OpponentTorque != nil && *dto.OpponentTorque == 0,
+	} {
+		if present {
+			nonData++
+		}
+	}
+	return topKeys <= nonData
 }
 
 func dtoToTelemetry(dto *wireTelemetryDTO, innerRaw []byte, topKeys int) *MachineTelemetry {
@@ -797,6 +819,29 @@ func isEmptyOrDisconnectMap(m map[string]json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// rivalAbsentMap is rivalAbsentDTO for the per-field fallback decode.
+func rivalAbsentMap(m map[string]json.RawMessage) bool {
+	if raw, ok := m[FieldIsConnected]; ok {
+		var connected bool
+		if err := json.Unmarshal(raw, &connected); err == nil && !connected {
+			return true
+		}
+	}
+	nonData := 0
+	for _, k := range [...]string{FieldIsConnected, FieldClientID, FieldLastMessageTimestamp} {
+		if _, ok := m[k]; ok {
+			nonData++
+		}
+	}
+	if raw, ok := m["opponent_torque"]; ok {
+		var v float64
+		if err := json.Unmarshal(raw, &v); err == nil && v == 0 {
+			nonData++
+		}
+	}
+	return len(m) <= nonData
 }
 
 func unmarshalStrictString(raw json.RawMessage) (string, bool) {

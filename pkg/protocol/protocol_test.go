@@ -202,6 +202,33 @@ func TestParseRivalEnvelope_AlphabeticalFirstKeyAndDefaults(t *testing.T) {
 	}
 }
 
+func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
+	for _, raw := range []string{
+		strings.Replace(machineTorqueFrame, `"is_connected": true`, `"is_connected": false`, 1),
+		`{"data":{"is_connected":false}}`,
+		`{"data":{"is_connected":false,"client_id":2,"last_message_timestamp":86400123}}`,
+		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}`,
+		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123,"opponent_torque":-0.0}}`,
+		// A field with an unexpected type sends decoding through the per-field fallback path.
+		`{"data":{"is_connected":false,"timeStamp":"late"}}`,
+		`{"data":{"client_id":"2","last_message_timestamp":86400123}}`,
+	} {
+		if rival, ok := protocol.ParseRivalEnvelope([]byte(raw)); ok || rival != nil {
+			t.Errorf("ParseRivalEnvelope accepted a frame without rival data: %s -> %+v", raw, rival)
+		}
+	}
+
+	for _, raw := range []string{
+		`{"data":{"multiplayer_state":"MULTIPLAYER_SM_READY","is_connected":true,"client_id":2}}`,
+		`{"data":{"machine_torque":0,"is_connected":true}}`,
+		`{"data":{"torque":0,"opponent_torque":0}}`,
+	} {
+		if rival, ok := protocol.ParseRivalEnvelope([]byte(raw)); !ok || rival == nil {
+			t.Errorf("ParseRivalEnvelope rejected a frame with rival data: %s", raw)
+		}
+	}
+}
+
 func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 	// Match commands (section 6.2)
 	msg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"START":1}}`), "", 0, false, "", true)
