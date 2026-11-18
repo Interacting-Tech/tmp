@@ -1,8 +1,9 @@
-bin/
-obj/
-.vs/
+/bin/
+/dist/
+/machine-agent
+*.exe
+*.out
+*.test
+coverage.txt
 .idea/
-*.user
-*.suo
-TestResults/
-publish/
+.vscode/
