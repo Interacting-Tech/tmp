@@ -25,10 +25,9 @@ Each local machine server pairs its physical machine with the bridge, which stan
 - **`pkg/netutil`** — Resolves the active IPv4 address of the host machine (`ResolveMachineIP`) via OS routing table lookup with active physical NIC fallback (handling isolated LANs without internet gateways) and constructs `ws://<machine-ip>:8080/ws?role=machine`.
 - **`pkg/protocol`** — Zero-reflection outbound wire serializer (`AppendMachineEnvelope`: ~550 ns/op, 0 allocs/op) and strict `PROTOCOL.md` parser (`ParseServerMessage`, `ParseRivalEnvelope`):
   - Single-key `"data"` envelope output; alphabetically-first top-level key selection on input.
-  - All 14 Section 3.2 fields plus the current firmware's `machine_torque` with exact defaults, `NaN`/`Inf`/`-0.0` float sanitization, extra-field pass-through, and server-field (`is_connected`, `client_id`, `last_message_timestamp`) stripping.
+  - All Section 3.2 fields with exact defaults, `NaN`/`Inf`/`-0.0` float sanitization, extra-field pass-through, and server-field (`is_connected`, `client_id`, `last_message_timestamp`) stripping.
   - Caches `server_player_id` across the 49 frames between every 50th message (`keeps last value`).
-  - Undoes the local server's Section 4.3 `opponent_torque` left/right sign flip (`UndoLocalServerFlip`) on outbound telemetry so two bridged machines never double-negate torque.
-  - Parses both Section 6.2 match command objects (`START`, `YOU_WIN`, `YOU_LOSE`) and Section 6.3 operator command strings (`STOP`, custom text), and detects `{"data":{}}` and Section 4.4 `{"data":{"opponent_torque":-0.0}}` disconnect frames.
+  - Parses both Section 6.2 match command objects (`START`, `YOU_WIN`, `YOU_LOSE`) and Section 6.3 operator command strings (`STOP`, custom text), and detects `{"data":{}}` and Section 4.4 `{"data":{"machine_torque":-0.0}}` disconnect frames.
 - **`pkg/machineclient`** — Real-time local WebSocket client (`TCP_NODELAY`, pooled read/write buffers, panic-safe callbacks, write deadlines, exponential-backoff reconnect, latest-message-wins coalescing, non-droppable terminal `GAMEOVER_WIN`/`GAMEOVER_LOSE` delivery, and `ClearRival` slot cycling to clear stale rival torque and reset stuck `MULTIPLAYER_WAITING` / `MULTIPLAYER_MID_MATCH` to `MULTIPLAYER_IDLE`).
 - **`pkg/bridge`** — Bidirectional `MachineBridge` + `WebSocketServerClient` connecting the local machine to our central server with latest-message-wins WAN forwarding, RFC 6455 ping/pong dead-link detection, and automatic local `ClearRival` safety reset if the rival leaves or the upstream connection drops mid-match.
 - **`cmd/machine-bridge`** — Standalone CLI/service binary (~6.8 MB static executable).
@@ -117,7 +116,7 @@ Environment variables (`OUR_SERVER_WS_URL`, `OUR_SERVER_TOKEN`, `MACHINE_ID`, `M
 
 ## Message Format
 
-The local server relays the machine's frames to the bridge like this (current firmware sends `machine_torque` instead of `torque` / `opponent_torque`):
+`machine_torque` is the only torque value, everywhere: from the machine, between the bridge and our server, and back to the machine. The local server relays the machine's frames to the bridge like this:
 
 ```json
 {"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45.0,"right_limit":45.0,"peak_force":28.0,"timeStamp":123456790,"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}
@@ -130,14 +129,13 @@ The local server relays the machine's frames to the bridge like this (current fi
 ```
 
 - `is_connected`, `client_id` and `last_message_timestamp` are dropped: they describe the local server's connection, and each server adds its own.
-- `torque` / `opponent_torque` are only sent if the machine sent them. The `"opponent_torque": -0.0` the local server writes into relayed frames when the hands differ (`PROTOCOL.md` section 4.3) is dropped.
-- Frames in the older format (`torque` + `opponent_torque`) are forwarded exactly as before.
+- `machine_torque` is sent as the local server relayed it, which is with its sign reversed when one player uses the left hand and the other the right (`PROTOCOL.md` section 4.3).
 - When the physical machine disconnects, the bridge sends `{"data":{}}`.
 - When the local server sends `START`, `YOU_LOSE` or `YOU_WIN`, the machine must have reported `MULTIPLAYER_SM_READY`, `MULTIPLAYER_SM_GAMEOVER_WIN` or `MULTIPLAYER_SM_GAMEOVER_LOSE`. If the bridge has not already sent that state, it sends the machine's last frame with it.
 
 **Our server → machine.** Our server sends the rival's frames in the same format, with the changes described in [Battle rules](#battle-rules): a left-handed rival's `machine_torque` is negated, and `multiplayer_state` carries the result when the server decides the battle. The bridge hands the rival's fields unchanged to the local server, which relays them to the machine every 10 ms, so the handle reflects the rival's `machine_torque`.
 
-The sign the machine receives is the one our server sent, whether or not the local servers apply the `PROTOCOL.md` section 4.3 sign rule to `machine_torque`: a frame passes through the sender's and the receiver's local server, both see the same two hands, so both flip the sign or neither does.
+A frame passes through two local servers, the sender's and the receiver's. Both see the same two hands, so both apply the `PROTOCOL.md` section 4.3 sign rule or neither does, and the two cancel. What the machine receives is therefore the rival machine's `machine_torque` with only our server's left-hand rule applied.
 
 The bridge clears the rival from the machine (the local server then sends it an empty `data` object, `PROTOCOL.md` section 4.4, and resets the match to `MULTIPLAYER_IDLE`) when:
 
