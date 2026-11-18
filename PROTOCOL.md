@@ -68,7 +68,7 @@ Each message is a JSON object with **one top-level key**, whose value is the tel
 | `peak_force` | number | `0.0` | Stored and relayed. |
 | `timeStamp` | unsigned integer | `0` | The machine's own clock. Stored and relayed. |
 
-The server does not define or check units, and does no arithmetic on the numbers other than the sign flip on `opponent_torque`. Any extra fields in the telemetry object are kept and relayed unchanged.
+The server does not define or check units, and does no arithmetic on the numbers other than the sign flip on `machine_torque`. Any extra fields in the telemetry object are kept and relayed unchanged.
 
 `multiplayer_state` values the server recognises:
 
@@ -98,11 +98,11 @@ After storing a machine's telemetry, the server adds three fields to it:
 
 ### 4.3 Torque sign rule
 
-If one player uses the left hand and the other uses the right hand, the server multiplies `opponent_torque` by −1 in both machines' relayed telemetry. If both players use the same hand, the value is relayed unchanged.
+If one player uses the left hand and the other uses the right hand, the server multiplies `machine_torque` by −1 in both machines' relayed telemetry. If both players use the same hand, the value is relayed unchanged.
 
 ### 4.4 When a machine disconnects
 
-The server clears that machine's stored telemetry to an empty object and frees its slot. The remaining machine then receives an empty `data` object (section 6.1). If the remaining machine's `hand` is `"left"`, the object contains only `"opponent_torque": -0.0`.
+The server clears that machine's stored telemetry to an empty object and frees its slot. The remaining machine then receives an empty `data` object (section 6.1). If the remaining machine's `hand` is `"left"`, the object contains only `"machine_torque": -0.0`.
 
 There is no timeout for a machine that stays connected but stops sending. The server keeps relaying its last telemetry.
 
