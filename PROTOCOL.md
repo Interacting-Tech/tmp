@@ -73,6 +73,8 @@ Each message is a JSON object with **one top-level key**, whose value is the tel
 
 The server does not define or check units, and does no arithmetic on the numbers other than the sign flip on `opponent_torque`. Any extra fields in the telemetry object are kept and relayed unchanged.
 
+Current machine firmware sends the handle torque as `machine_torque` (number) instead of `torque` and `opponent_torque`. The server treats it as an extra field: it is relayed unchanged and its sign is never flipped. Because the server still applies the section 4.3 rule to the missing `opponent_torque`, a machine can receive `"opponent_torque": -0.0` next to the opponent's `machine_torque` when the hands differ.
+
 `multiplayer_state` values the server recognises:
 
 - `MULTIPLAYER_SM_READY`
