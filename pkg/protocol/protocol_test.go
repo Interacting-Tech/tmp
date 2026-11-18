@@ -264,10 +264,16 @@ func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 	if !ok || msg.Kind != protocol.InboundCommand || msg.Command.Kind != protocol.CommandStart || msg.Command.IsOperatorCommand {
 		t.Fatalf("unexpected START parse: %+v", msg)
 	}
+	if got := msg.Command.InferredLocalMatchState(); got != protocol.StateReady {
+		t.Fatalf("START means the local machine reported %q, want %q", got, protocol.StateReady)
+	}
 
 	loseMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_LOSE":1}}`), "", 0, false, "", true)
 	if !ok || loseMsg.Command.Kind != protocol.CommandYouLose || loseMsg.Command.InferredLocalGameOverState() != protocol.StateGameOverWin {
 		t.Fatalf("unexpected YOU_LOSE parse: %+v", loseMsg)
+	}
+	if got := loseMsg.Command.InferredLocalMatchState(); got != protocol.StateGameOverWin {
+		t.Fatalf("YOU_LOSE means the local machine reported %q, want %q", got, protocol.StateGameOverWin)
 	}
 
 	winMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_WIN":0}}`), "", 0, false, "", true)
@@ -279,6 +285,9 @@ func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 	stopMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"STOP"}`), "", 0, false, "", true)
 	if !ok || stopMsg.Command.Kind != protocol.CommandStop || !stopMsg.Command.IsOperatorCommand {
 		t.Fatalf("unexpected STOP parse: %+v", stopMsg)
+	}
+	if got := stopMsg.Command.InferredLocalMatchState(); got != "" {
+		t.Fatalf("STOP says nothing about the local machine's state, got %q", got)
 	}
 
 	opMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"CALIB"}`), "", 0, false, "", true)

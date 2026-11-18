@@ -187,7 +187,9 @@ func (b *MachineBridge) handleLocalServerCommand(cmd protocol.ServerCommand) {
 	// Per PROTOCOL.md section 6.2, YOU_LOSE / YOU_WIN from the local server's 1ms loop proves the
 	// physical machine reported GAMEOVER_WIN / GAMEOVER_LOSE even if it cleared its state before
 	// the next 10ms telemetry tick. Synthesize and forward that terminal state if not yet sent.
-	inferred := cmd.InferredLocalGameOverState()
+	// START proves the same for READY, which the machine leaves as soon as it is told to start;
+	// without it the rival's local server may never see this machine ready, and never start.
+	inferred := cmd.InferredLocalMatchState()
 	if inferred == "" {
 		return
 	}

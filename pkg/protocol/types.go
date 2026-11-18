@@ -107,6 +107,17 @@ func (c ServerCommand) InferredLocalGameOverState() string {
 	}
 }
 
+// InferredLocalMatchState derives the multiplayer_state the local physical machine must have
+// reported for the local server to send this command. START is sent only while both machines
+// report MULTIPLAYER_SM_READY (section 5), so receiving it means the local machine was ready;
+// results are inferred as InferredLocalGameOverState describes.
+func (c ServerCommand) InferredLocalMatchState() string {
+	if c.Kind == CommandStart {
+		return StateReady
+	}
+	return c.InferredLocalGameOverState()
+}
+
 // ReceivedMachineData captures a 10 ms telemetry frame received from the local server (section 6.1).
 type ReceivedMachineData struct {
 	// HasMachineTelemetry is false when the server sent {"data":{}} or the section 4.4
