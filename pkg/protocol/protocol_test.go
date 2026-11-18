@@ -3,10 +3,97 @@ package protocol_test
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/Interacting-Tech/tmp/pkg/protocol"
 )
+
+// machineTorqueFrame is a frame from current machine firmware as relayed by a server
+// (the machine's local server, or our server relaying the rival).
+const machineTorqueFrame = `{
+  "data": {
+    "MAC_address": "11:22:33:44:55:66",
+    "player_id": "player-2",
+    "hand": "left",
+    "multiplayer_state": "MULTIPLAYER_SM_RUN",
+    "single_player_state": "",
+    "machine_torque": -12.5,
+    "position": -3.1,
+    "velocity": 0.4,
+    "left_limit": -45.0,
+    "right_limit": 45.0,
+    "peak_force": 28.0,
+    "timeStamp": 123456790,
+    "is_connected": true,
+    "client_id": 2,
+    "last_message_timestamp": 86400123
+  }
+}`
+
+// machineTorqueForwarded is machineTorqueFrame as the bridge forwards it in either direction:
+// same fields and values, minus the three fields the receiving server adds itself.
+const machineTorqueForwarded = `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45,"right_limit":45,"peak_force":28,"timeStamp":123456790}}`
+
+func forwardLocalFrame(t *testing.T, raw string) string {
+	t.Helper()
+	msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false, "right", true)
+	if !ok || msg.Kind != protocol.InboundTelemetry || !msg.Telemetry.HasMachineTelemetry {
+		t.Fatalf("expected machine telemetry from local server frame %s, got %+v", raw, msg)
+	}
+	return string(protocol.MarshalMachineEnvelope(
+		msg.Telemetry.NormalizedTelemetry, true, msg.Telemetry.EffectiveServerPlayerID))
+}
+
+func forwardRivalFrame(t *testing.T, raw string) string {
+	t.Helper()
+	rival, ok := protocol.ParseRivalEnvelope([]byte(raw))
+	if !ok || rival == nil {
+		t.Fatalf("expected rival telemetry from our server frame %s", raw)
+	}
+	return string(protocol.MarshalMachineEnvelope(rival, true, ""))
+}
+
+func TestMachineTorqueFrame_ForwardedBothWaysWithSameFieldsAndValues(t *testing.T) {
+	if got := forwardLocalFrame(t, machineTorqueFrame); got != machineTorqueForwarded {
+		t.Fatalf("machine -> our server\n got: %s\nwant: %s", got, machineTorqueForwarded)
+	}
+	if got := forwardRivalFrame(t, machineTorqueFrame); got != machineTorqueForwarded {
+		t.Fatalf("our server -> machine\n got: %s\nwant: %s", got, machineTorqueForwarded)
+	}
+
+	zero := strings.Replace(machineTorqueFrame, `"machine_torque": -12.5`, `"machine_torque": 0`, 1)
+	wantZero := strings.Replace(machineTorqueForwarded, `"machine_torque":-12.5`, `"machine_torque":0`, 1)
+	if got := forwardRivalFrame(t, zero); got != wantZero {
+		t.Fatalf("explicit zero machine_torque\n got: %s\nwant: %s", got, wantZero)
+	}
+
+	// A field with an unexpected type sends decoding through the per-field fallback path.
+	oddType := strings.Replace(machineTorqueFrame, `"timeStamp": 123456790`, `"timeStamp": "late"`, 1)
+	wantOdd := strings.Replace(machineTorqueForwarded, `"timeStamp":123456790`, `"timeStamp":0`, 1)
+	if got := forwardLocalFrame(t, oddType); got != wantOdd {
+		t.Fatalf("fallback decode\n got: %s\nwant: %s", got, wantOdd)
+	}
+}
+
+func TestMachineTorqueFrame_DropsLegacySignRuleArtifactKeepsRealTorqueFields(t *testing.T) {
+	withArtifact := strings.Replace(machineTorqueFrame,
+		`"machine_torque": -12.5,`, `"machine_torque": -12.5, "opponent_torque": -0.0,`, 1)
+	if got := forwardLocalFrame(t, withArtifact); got != machineTorqueForwarded {
+		t.Fatalf("local frame with sign-rule artifact\n got: %s\nwant: %s", got, machineTorqueForwarded)
+	}
+	if got := forwardRivalFrame(t, withArtifact); got != machineTorqueForwarded {
+		t.Fatalf("rival frame with sign-rule artifact\n got: %s\nwant: %s", got, machineTorqueForwarded)
+	}
+
+	withLegacyFields := strings.Replace(machineTorqueFrame,
+		`"machine_torque": -12.5,`, `"machine_torque": -12.5, "torque": 7.5, "opponent_torque": 3.25,`, 1)
+	want := strings.Replace(machineTorqueForwarded,
+		`"machine_torque":-12.5,`, `"machine_torque":-12.5,"torque":7.5,"opponent_torque":3.25,`, 1)
+	if got := forwardRivalFrame(t, withLegacyFields); got != want {
+		t.Fatalf("rival frame with real legacy torque fields\n got: %s\nwant: %s", got, want)
+	}
+}
 
 func TestMarshalMachineEnvelope_ExactProtocolFormatAndSanitization(t *testing.T) {
 	telemetry := &protocol.MachineTelemetry{

@@ -12,8 +12,15 @@ type MachineTelemetry struct {
 	Hand              string
 	MultiplayerState  string
 	SinglePlayerState string
+	// MachineTorque is the handle torque that current machine firmware sends instead of Torque and
+	// OpponentTorque. While HasMachineTorque is set, Torque and OpponentTorque are only serialized
+	// when their Has flags are set; otherwise both are always serialized (legacy frames).
+	MachineTorque     float64
+	HasMachineTorque  bool
 	Torque            float64
+	HasTorque         bool
 	OpponentTorque    float64
+	HasOpponentTorque bool
 	Position          float64
 	Velocity          float64
 	LeftLimit         float64
@@ -32,6 +39,7 @@ func (t *MachineTelemetry) Clone() *MachineTelemetry {
 
 	cp := *t
 	cp.Hand = NormalizeHand(t.Hand)
+	cp.MachineTorque = SanitizeFloat(t.MachineTorque)
 	cp.Torque = SanitizeFloat(t.Torque)
 	cp.OpponentTorque = SanitizeFloat(t.OpponentTorque)
 	cp.Position = SanitizeFloat(t.Position)
