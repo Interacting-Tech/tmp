@@ -40,10 +40,6 @@ type Options struct {
 	// (default: 50, matching PROTOCOL.md section 3.2; set to 1 to emit on every message).
 	ServerPlayerIDCadence int
 
-	// NormalizeLocalOpponentTorque undoes the local server's section 4.3 opponent_torque sign flip
-	// on NormalizedTelemetry so bridged servers never double-negate torque (default: true).
-	NormalizeLocalOpponentTorque *bool
-
 	// DialTimeout bounds WebSocket TCP handshake duration (default: 3s).
 	DialTimeout time.Duration
 
@@ -89,10 +85,6 @@ func (o Options) withDefaults() Options {
 	}
 	if out.ServerPlayerIDCadence <= 0 {
 		out.ServerPlayerIDCadence = 50
-	}
-	if out.NormalizeLocalOpponentTorque == nil {
-		b := true
-		out.NormalizeLocalOpponentTorque = &b
 	}
 	if out.DialTimeout <= 0 {
 		out.DialTimeout = 3 * time.Second

@@ -16,8 +16,6 @@ type wireTelemetryDTO struct {
 	MultiplayerState     *string  `json:"multiplayer_state"`
 	SinglePlayerState    *string  `json:"single_player_state"`
 	MachineTorque        *float64 `json:"machine_torque"`
-	Torque               *float64 `json:"torque"`
-	OpponentTorque       *float64 `json:"opponent_torque"`
 	Position             *float64 `json:"position"`
 	Velocity             *float64 `json:"velocity"`
 	LeftLimit            *float64 `json:"left_limit"`
@@ -72,20 +70,8 @@ func AppendMachineEnvelope(
 	dst = append(dst, `,"single_player_state":`...)
 	dst = strconv.AppendQuote(dst, t.SinglePlayerState)
 
-	if t.HasMachineTorque {
-		dst = append(dst, `,"machine_torque":`...)
-		dst = appendJSONFloat(dst, t.MachineTorque)
-	}
-
-	if !t.HasMachineTorque || t.HasTorque {
-		dst = append(dst, `,"torque":`...)
-		dst = appendJSONFloat(dst, t.Torque)
-	}
-
-	if !t.HasMachineTorque || t.HasOpponentTorque {
-		dst = append(dst, `,"opponent_torque":`...)
-		dst = appendJSONFloat(dst, t.OpponentTorque)
-	}
+	dst = append(dst, `,"machine_torque":`...)
+	dst = appendJSONFloat(dst, t.MachineTorque)
 
 	dst = append(dst, `,"position":`...)
 	dst = appendJSONFloat(dst, t.Position)
@@ -173,8 +159,6 @@ func ParseServerMessage(
 	prevServerPlayerID string,
 	prevTimestamp int64,
 	hasPrevTimestamp bool,
-	lastSentRivalHand string,
-	normalizeOpponentTorque bool,
 ) (*InboundMessage, bool) {
 	innerRaw, isCmd, ok := extractEnvelopeInner(raw, true)
 	if !ok {
@@ -201,8 +185,6 @@ func ParseServerMessage(
 			prevServerPlayerID,
 			prevTimestamp,
 			hasPrevTimestamp,
-			lastSentRivalHand,
-			normalizeOpponentTorque,
 		)
 	}
 
@@ -221,7 +203,7 @@ func ParseServerMessage(
 		lastMsgTS = *dto.LastMessageTimestamp
 	}
 
-	// Empty {"data":{}} or section 4.4 left-hand disconnect {"data":{"opponent_torque":-0.0}}
+	// Empty {"data":{}} or section 4.4 left-hand disconnect {"data":{"machine_torque":-0.0}}
 	if (!hasIsConnected && isEmptyOrDisconnectDTO(&dto, topKeys)) || (hasIsConnected && !isConnected) {
 		return &InboundMessage{
 			Kind: InboundTelemetry,
@@ -249,8 +231,6 @@ func ParseServerMessage(
 		prevServerPlayerID,
 		prevTimestamp,
 		hasPrevTimestamp,
-		lastSentRivalHand,
-		normalizeOpponentTorque,
 	), true
 }
 
@@ -331,10 +311,7 @@ func isEmptyOrDisconnectDTO(dto *wireTelemetryDTO, topKeys int) bool {
 		return true
 	}
 	// Section 4.4: the sign rule leaves a lone zero torque in the otherwise empty object.
-	if topKeys == 1 && (isZero(dto.OpponentTorque) || isZero(dto.MachineTorque)) {
-		return true
-	}
-	return false
+	return topKeys == 1 && isZero(dto.MachineTorque)
 }
 
 func isZero(v *float64) bool {
@@ -352,7 +329,6 @@ func rivalAbsentDTO(dto *wireTelemetryDTO, topKeys int) bool {
 		dto.IsConnected != nil,
 		dto.ClientID != nil,
 		dto.LastMessageTimestamp != nil,
-		isZero(dto.OpponentTorque),
 		isZero(dto.MachineTorque),
 	} {
 		if present {
@@ -393,17 +369,6 @@ func dtoToTelemetry(dto *wireTelemetryDTO, innerRaw []byte, topKeys int) *Machin
 	}
 	if dto.MachineTorque != nil {
 		t.MachineTorque = SanitizeFloat(*dto.MachineTorque)
-		t.HasMachineTorque = true
-		matched++
-	}
-	if dto.Torque != nil {
-		t.Torque = SanitizeFloat(*dto.Torque)
-		t.HasTorque = true
-		matched++
-	}
-	if dto.OpponentTorque != nil {
-		t.OpponentTorque = *dto.OpponentTorque
-		t.HasOpponentTorque = true
 		matched++
 	}
 	if dto.Position != nil {
@@ -460,19 +425,7 @@ func dtoToTelemetry(dto *wireTelemetryDTO, innerRaw []byte, topKeys int) *Machin
 		}
 	}
 
-	dropOpponentTorqueArtifact(t)
 	return t
-}
-
-// dropOpponentTorqueArtifact removes a zero opponent_torque from machine_torque frames. The legacy
-// server's section 4.3 sign rule writes opponent_torque into relayed frames even when the machine
-// never sent it (-1 x the 0.0 default, see section 4.4), so in a machine_torque frame a zero value
-// is that server artifact rather than machine data.
-func dropOpponentTorqueArtifact(t *MachineTelemetry) {
-	if t.HasMachineTorque && t.HasOpponentTorque && t.OpponentTorque == 0 {
-		t.OpponentTorque = 0
-		t.HasOpponentTorque = false
-	}
 }
 
 func finalizeInboundTelemetry(
@@ -486,8 +439,6 @@ func finalizeInboundTelemetry(
 	prevServerPlayerID string,
 	prevTimestamp int64,
 	hasPrevTimestamp bool,
-	lastSentRivalHand string,
-	normalizeOpponentTorque bool,
 ) *InboundMessage {
 	effectiveSPID := prevServerPlayerID
 	if rawTelemetry.HasServerPlayerID {
@@ -498,13 +449,6 @@ func finalizeInboundTelemetry(
 	if !normalized.HasServerPlayerID && effectiveSPID != "" {
 		normalized.ServerPlayerID = effectiveSPID
 		normalized.HasServerPlayerID = true
-	}
-	if normalizeOpponentTorque {
-		normalized.OpponentTorque = UndoLocalServerFlip(
-			rawTelemetry.OpponentTorque,
-			rawTelemetry.Hand,
-			lastSentRivalHand,
-		)
 	}
 
 	isNewSample := !hasLastMsgTS || !hasPrevTimestamp || lastMsgTS != prevTimestamp
@@ -536,8 +480,6 @@ func parseServerMessageFallback(
 	prevServerPlayerID string,
 	prevTimestamp int64,
 	hasPrevTimestamp bool,
-	lastSentRivalHand string,
-	normalizeOpponentTorque bool,
 ) (*InboundMessage, bool) {
 	dataMap, ok := decodeStrictJSONObject(innerRaw)
 	if !ok {
@@ -601,8 +543,6 @@ func parseServerMessageFallback(
 		prevServerPlayerID,
 		prevTimestamp,
 		hasPrevTimestamp,
-		lastSentRivalHand,
-		normalizeOpponentTorque,
 	), true
 }
 
@@ -686,13 +626,6 @@ func decodeTelemetryMap(dataMap map[string]json.RawMessage) *MachineTelemetry {
 			t.SinglePlayerState = unmarshalStringOrDefault(raw, "")
 		case "machine_torque":
 			t.MachineTorque = unmarshalFloatOrDefault(raw, 0)
-			t.HasMachineTorque = true
-		case "torque":
-			t.Torque = unmarshalFloatOrDefault(raw, 0)
-			t.HasTorque = true
-		case "opponent_torque":
-			t.OpponentTorque = unmarshalFloatOrDefault(raw, 0)
-			t.HasOpponentTorque = true
 		case "position":
 			t.Position = unmarshalFloatOrDefault(raw, 0)
 		case "velocity":
@@ -717,7 +650,6 @@ func decodeTelemetryMap(dataMap map[string]json.RawMessage) *MachineTelemetry {
 	}
 
 	t.ExtraFields = extras
-	dropOpponentTorqueArtifact(t)
 	return t
 }
 
@@ -779,7 +711,7 @@ func countObjectTopKeys(validObj []byte) int {
 func isKnownTelemetryOrServerKey(k string) bool {
 	switch k {
 	case "MAC_address", "player_id", "server_player_id", "hand",
-		"multiplayer_state", "single_player_state", "machine_torque", "torque", "opponent_torque",
+		"multiplayer_state", "single_player_state", "machine_torque",
 		"position", "velocity", "left_limit", "right_limit", "peak_force",
 		"timeStamp", FieldIsConnected, FieldClientID, FieldLastMessageTimestamp:
 		return true
@@ -816,7 +748,7 @@ func isEmptyOrDisconnectMap(m map[string]json.RawMessage) bool {
 	if len(m) == 0 {
 		return true
 	}
-	return len(m) == 1 && (isZeroRaw(m, "opponent_torque") || isZeroRaw(m, "machine_torque"))
+	return len(m) == 1 && isZeroRaw(m, "machine_torque")
 }
 
 func isZeroRaw(m map[string]json.RawMessage, key string) bool {
@@ -842,10 +774,8 @@ func rivalAbsentMap(m map[string]json.RawMessage) bool {
 			nonData++
 		}
 	}
-	for _, k := range [...]string{"opponent_torque", "machine_torque"} {
-		if isZeroRaw(m, k) {
-			nonData++
-		}
+	if isZeroRaw(m, "machine_torque") {
+		nonData++
 	}
 	return len(m) <= nonData
 }

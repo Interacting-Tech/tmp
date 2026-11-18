@@ -15,15 +15,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// simulatedMachineServer faithfully emulates the legacy arm-wrestling server described in PROTOCOL.md:
+// simulatedMachineServer faithfully emulates the arm-wrestling server described in PROTOCOL.md:
 //   - Listens on ws://<bindIP>:<port>/ws?role=machine
 //   - Pairs exactly 2 machines (3rd accepted on socket and ignored)
 //   - Runs a 1ms main loop reading newest message per slot and running the match state machine
 //   - Broadcasts opponent telemetry every 10ms with is_connected, client_id, last_message_timestamp,
-//     and the section 4.3/4.4 torque sign flip (including -0.0 when remaining hand is "left")
-//
-// The sign flip applies to opponent_torque, as in the first PROTOCOL.md revision, unless
-// UseSignRuleField selects machine_torque, as in the current one.
+//     and the section 4.3/4.4 machine_torque sign flip (including -0.0 when remaining hand is "left")
 type simulatedMachineServer struct {
 	bindIP            net.IP
 	port              int
@@ -37,7 +34,6 @@ type simulatedMachineServer struct {
 	matchState        string
 	postMatchEntered  time.Time
 	nextClientID      atomic.Int32
-	signRuleField     string
 	stopLoop          chan struct{}
 	loopDone          chan struct{}
 }
@@ -80,7 +76,6 @@ func startSimulatedMachineServer(bindIP net.IP, postMatchDuration time.Duration)
 		slots:             [2]*simSlot{{}, {}},
 		allConns:          make(map[*simConn]struct{}),
 		matchState:        protocol.ServerIdle,
-		signRuleField:     "opponent_torque",
 		stopLoop:          make(chan struct{}),
 		loopDone:          make(chan struct{}),
 	}
@@ -114,13 +109,6 @@ func startSimulatedMachineServer(bindIP net.IP, postMatchDuration time.Duration)
 
 func (s *simulatedMachineServer) EndpointURL() string {
 	return fmt.Sprintf("ws://%s:%d/ws?role=machine", s.bindIP.String(), s.port)
-}
-
-// UseSignRuleField selects the telemetry field the section 4.3 sign rule is applied to.
-func (s *simulatedMachineServer) UseSignRuleField(field string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.signRuleField = field
 }
 
 func (s *simulatedMachineServer) Port() int {
@@ -295,15 +283,15 @@ func (s *simulatedMachineServer) mainLoop() {
 				s.mu.Lock()
 				h1 := slotStringField(s.slots[0], "hand")
 				h2 := slotStringField(s.slots[1], "hand")
-				flip := protocol.DoesServerFlipOpponentTorque(h1, h2)
+				flip := serverFlipsTorque(h1, h2)
 
 				c1 = s.slots[0].conn
 				c2 = s.slots[1].conn
 				if c1 != nil {
-					m1 = buildRelayedJSON(s.slots[1], flip, s.signRuleField)
+					m1 = buildRelayedJSON(s.slots[1], flip)
 				}
 				if c2 != nil {
-					m2 = buildRelayedJSON(s.slots[0], flip, s.signRuleField)
+					m2 = buildRelayedJSON(s.slots[0], flip)
 				}
 				s.mu.Unlock()
 
@@ -349,10 +337,16 @@ func (s *simulatedMachineServer) consumeNewest(slot *simSlot, nowMs int64) {
 	slot.stored = inner
 }
 
-func buildRelayedJSON(source *simSlot, flip bool, signRuleField string) string {
+// serverFlipsTorque is the server's sign rule condition across PROTOCOL.md sections 4.3 and 4.4:
+// one slot's hand is "left" and the other's is not, which also covers an empty slot.
+func serverFlipsTorque(handA, handB string) bool {
+	return (protocol.NormalizeHand(handA) == protocol.HandLeft) != (protocol.NormalizeHand(handB) == protocol.HandLeft)
+}
+
+func buildRelayedJSON(source *simSlot, flip bool) string {
 	if source.conn == nil || source.stored == nil {
 		if flip {
-			return `{"data":{"` + signRuleField + `":-0.0}}`
+			return `{"data":{"machine_torque":-0.0}}`
 		}
 		return `{"data":{}}`
 	}
@@ -363,15 +357,15 @@ func buildRelayedJSON(source *simSlot, flip bool, signRuleField string) string {
 	}
 
 	if flip {
-		oppTorque := 0.0
-		if raw, ok := cp[signRuleField]; ok {
-			_ = json.Unmarshal(raw, &oppTorque)
+		torque := 0.0
+		if raw, ok := cp["machine_torque"]; ok {
+			_ = json.Unmarshal(raw, &torque)
 		}
-		if oppTorque == 0 {
-			cp[signRuleField] = json.RawMessage(`-0.0`)
+		if torque == 0 {
+			cp["machine_torque"] = json.RawMessage(`-0.0`)
 		} else {
-			b, _ := json.Marshal(-oppTorque)
-			cp[signRuleField] = b
+			b, _ := json.Marshal(-torque)
+			cp["machine_torque"] = b
 		}
 	}
 

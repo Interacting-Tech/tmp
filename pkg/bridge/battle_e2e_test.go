@@ -14,10 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// The local server applies its section 4.3 sign rule to machine_torque in the current PROTOCOL.md
-// revision and to opponent_torque in the first one. A battle must come out the same with either.
-var localServerSignRuleFields = []string{"machine_torque", "opponent_torque"}
-
 // battleRig is two machines, each with its own PROTOCOL.md server and bridge, connected through
 // the real battle server. Machine A's player uses the left hand, machine B's the right.
 type battleRig struct {
@@ -30,7 +26,7 @@ type battleRig struct {
 	bridgeA              *bridge.MachineBridge
 }
 
-func startBattleRig(t *testing.T, signRuleField string) *battleRig {
+func startBattleRig(t *testing.T) *battleRig {
 	t.Helper()
 	const token = "test-token"
 	battles := battleserver.New(battleserver.Options{
@@ -51,8 +47,6 @@ func startBattleRig(t *testing.T, signRuleField string) *battleRig {
 		cabinetA:  startTestCabinet(t),
 		cabinetB:  startTestCabinet(t),
 	}
-	r.cabinetA.UseSignRuleField(signRuleField)
-	r.cabinetB.UseSignRuleField(signRuleField)
 
 	r.physA = dialTestMachine(t, r.cabinetA.EndpointURL())
 	t.Cleanup(func() { _ = r.physA.Close() })
@@ -109,104 +103,96 @@ func (r *battleRig) bothIdle() {
 // Ready, start, torque exchange, a result reported by a machine, rematch, and one side going
 // offline and returning.
 func TestEndToEnd_BattleBetweenTwoMachinesThroughBattleServer(t *testing.T) {
-	for _, signRuleField := range localServerSignRuleFields {
-		t.Run("local server sign rule on "+signRuleField, func(t *testing.T) {
-			r := startBattleRig(t, signRuleField)
+	r := startBattleRig(t)
 
-			r.bothReadyThenStarted()
+	r.bothReadyThenStarted()
 
-			// During the battle each machine receives the other's handle data. Machine A's player
-			// uses the left hand, so machine B receives A's machine_torque negated; machine A
-			// receives right-handed B's as B sent it.
-			writeText(t, r.physA, firmwareFrameA)
-			writeText(t, r.physB, firmwareFrameB)
-			assertMachineReceivedRival(t, waitForFrame(t, r.framesAtB, 3*time.Second, func(s string) bool {
-				return strings.Contains(s, `"player-2"`) && strings.Contains(s, protocol.StateRun)
-			}), withField(firmwareFrameA, `"machine_torque":-12.5`, `"machine_torque":12.5`))
-			assertMachineReceivedRival(t, waitForFrame(t, r.framesAtA, 3*time.Second, func(s string) bool {
-				return strings.Contains(s, `"player-1"`) && strings.Contains(s, protocol.StateRun)
-			}), firmwareFrameB)
+	// During the battle each machine receives the other's handle data. Machine A's player
+	// uses the left hand, so machine B receives A's machine_torque negated; machine A
+	// receives right-handed B's as B sent it.
+	writeText(t, r.physA, firmwareFrameA)
+	writeText(t, r.physB, firmwareFrameB)
+	assertMachineReceivedRival(t, waitForFrame(t, r.framesAtB, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, `"player-2"`) && strings.Contains(s, protocol.StateRun)
+	}), withField(firmwareFrameA, `"machine_torque":-12.5`, `"machine_torque":12.5`))
+	assertMachineReceivedRival(t, waitForFrame(t, r.framesAtA, 3*time.Second, func(s string) bool {
+		return strings.Contains(s, `"player-1"`) && strings.Contains(s, protocol.StateRun)
+	}), firmwareFrameB)
 
-			// Machine A reports a win: machine B is told it lost, and both local matches finish.
-			writeText(t, r.physA, inState(firmwareFrameA, protocol.StateGameOverWin))
-			waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
-			r.bothIdle()
+	// Machine A reports a win: machine B is told it lost, and both local matches finish.
+	writeText(t, r.physA, inState(firmwareFrameA, protocol.StateGameOverWin))
+	waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
+	r.bothIdle()
 
-			// The same two machines can battle again.
-			r.bothReadyThenStarted()
+	// The same two machines can battle again.
+	r.bothReadyThenStarted()
 
-			// Machine A's bridge goes offline mid-battle: machine B loses its rival and its battle is
-			// abandoned. Machine B still reports ready, so its local server goes back to waiting.
-			if r.cabinetB.MatchState() != protocol.ServerMidMatch {
-				t.Fatalf("cabinet B is in %s before bridge A goes offline, want %s", r.cabinetB.MatchState(), protocol.ServerMidMatch)
-			}
-			if err := r.bridgeA.Stop(context.Background()); err != nil {
-				t.Fatalf("stop bridge A: %v", err)
-			}
-			waitForFrame(t, r.framesAtB, 3*time.Second, func(s string) bool {
-				return s == `{"data":{}}`
-			})
-			waitUntil(t, 3*time.Second, func() bool {
-				return r.cabinetB.MatchState() == protocol.ServerWaiting
-			})
-
-			// Machine A's bridge comes back: machine B sees machine A again.
-			r.startBridge(r.cabinetA, "cabinet-A")
-			returned := withField(firmwareFrameA, `"timeStamp":123456790`, `"timeStamp":424242`)
-			writeText(t, r.physA, returned)
-			assertMachineReceivedRival(t, waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"timeStamp":424242`)),
-				withField(returned, `"machine_torque":-12.5`, `"machine_torque":12.5`))
-		})
+	// Machine A's bridge goes offline mid-battle: machine B loses its rival and its battle is
+	// abandoned. Machine B still reports ready, so its local server goes back to waiting.
+	if r.cabinetB.MatchState() != protocol.ServerMidMatch {
+		t.Fatalf("cabinet B is in %s before bridge A goes offline, want %s", r.cabinetB.MatchState(), protocol.ServerMidMatch)
 	}
+	if err := r.bridgeA.Stop(context.Background()); err != nil {
+		t.Fatalf("stop bridge A: %v", err)
+	}
+	waitForFrame(t, r.framesAtB, 3*time.Second, func(s string) bool {
+		return s == `{"data":{}}`
+	})
+	waitUntil(t, 3*time.Second, func() bool {
+		return r.cabinetB.MatchState() == protocol.ServerWaiting
+	})
+
+	// Machine A's bridge comes back: machine B sees machine A again.
+	r.startBridge(r.cabinetA, "cabinet-A")
+	returned := withField(firmwareFrameA, `"timeStamp":123456790`, `"timeStamp":424242`)
+	writeText(t, r.physA, returned)
+	assertMachineReceivedRival(t, waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"timeStamp":424242`)),
+		withField(returned, `"machine_torque":-12.5`, `"machine_torque":12.5`))
 }
 
 // The battle server decides the battle when a handle reaches one of its position limits, and each
 // machine is told the result by its own local server, as PROTOCOL.md section 6.2 describes.
 func TestEndToEnd_HandleReachingItsLimitDecidesTheBattle(t *testing.T) {
-	for _, signRuleField := range localServerSignRuleFields {
-		t.Run("local server sign rule on "+signRuleField, func(t *testing.T) {
-			r := startBattleRig(t, signRuleField)
+	r := startBattleRig(t)
 
-			// Before the battle starts a handle at its limit decides nothing.
-			writeText(t, r.physA, withField(firmwareFrameA, `"position":-3.1`, `"position":-45.0`))
-			writeText(t, r.physB, firmwareFrameB)
-			waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"position":-45`))
-			expectNoFrame(t, r.framesAtA, 100*time.Millisecond, contains(`"cmd"`))
+	// Before the battle starts a handle at its limit decides nothing.
+	writeText(t, r.physA, withField(firmwareFrameA, `"position":-3.1`, `"position":-45.0`))
+	writeText(t, r.physB, firmwareFrameB)
+	waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"position":-45`))
+	expectNoFrame(t, r.framesAtA, 100*time.Millisecond, contains(`"cmd"`))
 
-			// Left-handed machine A reaches its left limit: A wins.
-			r.bothReadyThenStarted()
-			writeText(t, r.physA, firmwareFrameA)
-			writeText(t, r.physB, firmwareFrameB)
-			writeText(t, r.physA, withField(firmwareFrameA, `"position":-3.1`, `"position":-45.0`))
-			waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_WIN"`))
-			waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
-			r.bothIdle()
+	// Left-handed machine A reaches its left limit: A wins.
+	r.bothReadyThenStarted()
+	writeText(t, r.physA, firmwareFrameA)
+	writeText(t, r.physB, firmwareFrameB)
+	writeText(t, r.physA, withField(firmwareFrameA, `"position":-3.1`, `"position":-45.0`))
+	waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_WIN"`))
+	waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
+	r.bothIdle()
 
-			// Rematch. Right-handed machine B reaches its right limit: B wins.
-			r.bothReadyThenStarted()
-			writeText(t, r.physA, firmwareFrameA)
-			writeText(t, r.physB, firmwareFrameB)
-			writeText(t, r.physB, withField(firmwareFrameB, `"position":2.5`, `"position":40.0`))
-			waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_WIN"`))
-			waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_LOSE"`))
-			r.bothIdle()
+	// Rematch. Right-handed machine B reaches its right limit: B wins.
+	r.bothReadyThenStarted()
+	writeText(t, r.physA, firmwareFrameA)
+	writeText(t, r.physB, firmwareFrameB)
+	writeText(t, r.physB, withField(firmwareFrameB, `"position":2.5`, `"position":40.0`))
+	waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_WIN"`))
+	waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_LOSE"`))
+	r.bothIdle()
 
-			// Rematch. Right-handed machine B is pushed to its left limit: B loses.
-			r.bothReadyThenStarted()
-			writeText(t, r.physA, firmwareFrameA)
-			writeText(t, r.physB, firmwareFrameB)
-			writeText(t, r.physB, withField(firmwareFrameB, `"position":2.5`, `"position":-40.0`))
-			waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
-			waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_WIN"`))
-		})
-	}
+	// Rematch. Right-handed machine B is pushed to its left limit: B loses.
+	r.bothReadyThenStarted()
+	writeText(t, r.physA, firmwareFrameA)
+	writeText(t, r.physB, firmwareFrameB)
+	writeText(t, r.physB, withField(firmwareFrameB, `"position":2.5`, `"position":-40.0`))
+	waitForFrame(t, r.framesAtB, 3*time.Second, contains(`"YOU_LOSE"`))
+	waitForFrame(t, r.framesAtA, 3*time.Second, contains(`"YOU_WIN"`))
 }
 
 // Machine firmware leaves MULTIPLAYER_SM_READY as soon as its local server tells it to start, which
 // for the second player to get ready is about a millisecond after reporting it: less than the
 // 10 ms between the frames its local server relays. The first player's machine must start anyway.
 func TestEndToEnd_BattleStartsWhenTheSecondMachineIsReadyOnlyForAnInstant(t *testing.T) {
-	r := startBattleRig(t, "machine_torque")
+	r := startBattleRig(t)
 
 	// Both machines are connected and sending before anyone is ready.
 	writeText(t, r.physA, inState(firmwareFrameA, "MULTIPLAYER_SM_IDLE"))

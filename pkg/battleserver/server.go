@@ -321,7 +321,7 @@ func (s *Server) handleFrame(m *machine, raw []byte) {
 	}
 
 	// {"data":{}} or "is_connected": false: the bridge is connected but its machine is not.
-	parsed, ok := protocol.ParseServerMessage(raw, "", 0, false, "", false)
+	parsed, ok := protocol.ParseServerMessage(raw, "", 0, false)
 	if !ok || parsed.Kind != protocol.InboundTelemetry || parsed.Telemetry == nil || parsed.Telemetry.HasMachineTelemetry {
 		return
 	}
@@ -441,7 +441,7 @@ func (s *Server) relayLocked(m *machine) {
 		out.MultiplayerState = protocol.StateReady
 	}
 	// The rival receives a left-handed player's torque with its sign reversed.
-	if out.HasMachineTorque && protocol.NormalizeHand(out.Hand) == protocol.HandLeft {
+	if protocol.NormalizeHand(out.Hand) == protocol.HandLeft {
 		out.MachineTorque = protocol.SanitizeFloat(-out.MachineTorque)
 	}
 

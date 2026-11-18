@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// bridgeFrame is a frame as current machine firmware reports it, including the three fields a
+// bridgeFrame is a frame as machine firmware reports it, including the three fields a
 // PROTOCOL.md server adds. Bridges strip those before sending, but the server must cope with them.
 const bridgeFrame = `{
   "data": {

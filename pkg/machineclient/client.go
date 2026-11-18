@@ -56,7 +56,6 @@ type Client struct {
 	writeMu                  sync.Mutex
 	sendWake                 chan struct{}
 	hasActiveRival           atomic.Bool
-	lastSentRivalHand        atomic.Pointer[string]
 	serverConnected          atomic.Bool
 	localMachineConnected    atomic.Bool
 	latestLocalData          atomic.Pointer[protocol.ReceivedMachineData]
@@ -110,9 +109,6 @@ func New(opts Options) (*Client, error) {
 			},
 		},
 	}
-
-	emptyHand := ""
-	c.lastSentRivalHand.Store(&emptyHand)
 	return c, nil
 }
 
@@ -373,9 +369,6 @@ func (c *Client) runSingleSession(parentCtx context.Context) (wasIntentionalRese
 	connectedOnce = true
 	conn.SetReadLimit(c.opts.MaxInboundMessageBytes)
 
-	emptyHand := ""
-	c.lastSentRivalHand.Store(&emptyHand)
-
 	c.rivalMu.Lock()
 	c.activeConn = conn
 	c.activeSessionCancel = sessCancel
@@ -433,8 +426,6 @@ func (c *Client) receiveLoop(ctx context.Context, conn *websocket.Conn) {
 		hasLastMsgTS       bool
 	)
 
-	normalizeTorque := *c.opts.NormalizeLocalOpponentTorque
-
 	for {
 		if ctx.Err() != nil {
 			return
@@ -471,19 +462,11 @@ func (c *Client) receiveLoop(ctx context.Context, conn *websocket.Conn) {
 			continue
 		}
 
-		rivalHandPtr := c.lastSentRivalHand.Load()
-		rivalHand := ""
-		if rivalHandPtr != nil {
-			rivalHand = *rivalHandPtr
-		}
-
 		parsed, ok := protocol.ParseServerMessage(
 			buf.Bytes(),
 			lastLocalServerPID,
 			lastMsgTS,
 			hasLastMsgTS,
-			rivalHand,
-			normalizeTorque,
 		)
 		readBufPool.Put(buf)
 
@@ -603,9 +586,6 @@ func (c *Client) sendLoop(ctx context.Context, conn *websocket.Conn) {
 
 			outboundCount++
 			includeSPID := ((outboundCount - 1) % cadence) == 0
-
-			handVal := protocol.NormalizeHand(toSend.Hand)
-			c.lastSentRivalHand.Store(&handVal)
 
 			bufPtr := marshalBufPool.Get().(*[]byte)
 			payload := protocol.AppendMachineEnvelope((*bufPtr)[:0], toSend, includeSPID, fallbackServerPID)

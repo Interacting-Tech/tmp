@@ -329,7 +329,7 @@ func TestRelay_LeftHandMachineTorqueIsNegatedForTheRival(t *testing.T) {
 		{"left hand, other spelling", `{"data":{"hand":" Left ","machine_torque":3}}`, `"machine_torque":-3,`},
 		{"right hand", `{"data":{"hand":"right","machine_torque":-12.5}}`, `"machine_torque":-12.5,`},
 		{"hand not reported", `{"data":{"machine_torque":-12.5}}`, `"machine_torque":-12.5,`},
-		{"left hand, older torque fields are left alone", `{"data":{"hand":"left","torque":5,"opponent_torque":3}}`, `"torque":5,"opponent_torque":3,`},
+		{"left hand, no torque reported", `{"data":{"hand":"left","position":3}}`, `"machine_torque":0,`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, a, b := newPair()

@@ -169,7 +169,7 @@ func (s *testCentralRelayServer) Close() {
 	s.mu.Unlock()
 }
 
-func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorqueRule(t *testing.T) {
+func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorque(t *testing.T) {
 	localIP, err := netutil.ResolveMachineIP(netutil.IPResolveOptions{AllowLoopback: true})
 	if err != nil {
 		t.Fatalf("ResolveMachineIP: %v", err)
@@ -279,13 +279,14 @@ func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorqueRule(t *tes
 		return strings.Contains(s, `"START"`)
 	})
 
-	// 2. Active run with opposite hands ("right" vs "left"): verify single torque sign flip (no double flip!).
+	// 2. Active run with opposite hands ("right" vs "left"). Each machine's local server applies the
+	// section 4.3 sign rule to machine_torque, once on the way out and once on the way in, so a
+	// relay that changes nothing delivers the value the rival's machine sent.
 	sendMachineFrame(t, physA, &protocol.MachineTelemetry{
 		PlayerID:         "fighter-A",
 		Hand:             "right",
 		MultiplayerState: protocol.StateRun,
-		Torque:           28.0,
-		OpponentTorque:   21.5,
+		MachineTorque:    28.0,
 		Position:         5.5,
 		TimeStamp:        1001,
 	})
@@ -293,8 +294,7 @@ func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorqueRule(t *tes
 		PlayerID:         "fighter-B",
 		Hand:             "left",
 		MultiplayerState: protocol.StateRun,
-		Torque:           21.5,
-		OpponentTorque:   28.0,
+		MachineTorque:    21.5,
 		Position:         -5.5,
 		TimeStamp:        1002,
 	})
@@ -308,8 +308,13 @@ func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorqueRule(t *tes
 	if err := json.Unmarshal([]byte(runAtB), &parsedAtB); err != nil {
 		t.Fatalf("unmarshal runAtB: %v", err)
 	}
-	if got := parsedAtB.Data["opponent_torque"]; got != -21.5 {
-		t.Fatalf("Physical Machine B opponent_torque = %v, want -21.5 (single flip)", got)
+	if got := parsedAtB.Data["machine_torque"]; got != 28.0 {
+		t.Fatalf("Physical Machine B received machine_torque = %v, want 28 as machine A sent it", got)
+	}
+	for _, gone := range []string{"torque", "opponent_torque"} {
+		if v, ok := parsedAtB.Data[gone]; ok {
+			t.Fatalf("Physical Machine B received %s = %v; machine_torque is the only torque field", gone, v)
+		}
 	}
 
 	// 3. Machine A wins (MULTIPLAYER_SM_GAMEOVER_WIN) -> Machine B receives {"cmd":{"YOU_LOSE":...}}.
@@ -317,8 +322,7 @@ func TestEndToEnd_TwoMachinesViaOurServer_FullMatchLifecycleAndTorqueRule(t *tes
 		PlayerID:         "fighter-A",
 		Hand:             "right",
 		MultiplayerState: protocol.StateGameOverWin,
-		Torque:           35.0,
-		OpponentTorque:   12.0,
+		MachineTorque:    35.0,
 	})
 	waitForFrame(t, framesAtB, 3*time.Second, func(s string) bool {
 		return strings.Contains(s, `"YOU_LOSE"`)
@@ -392,9 +396,9 @@ func TestMachineBridge_SafetyResetOnUpstreamDropAndStuckWaitingClear(t *testing.
 	_ = physMachine.WriteMessage(websocket.BinaryMessage, []byte{1, 2, 3, 4})
 	_ = physMachine.WriteMessage(websocket.TextMessage, []byte(`{broken`))
 	sendMachineFrame(t, physMachine, &protocol.MachineTelemetry{
-		PlayerID: "local-1",
-		Hand:     "right",
-		Torque:   10.0,
+		PlayerID:      "local-1",
+		Hand:          "right",
+		MachineTorque: 10.0,
 	})
 	waitUntil(t, 3*time.Second, func() bool {
 		d := mb.LocalClient().LatestLocalData()
@@ -412,7 +416,7 @@ func TestMachineBridge_SafetyResetOnUpstreamDropAndStuckWaitingClear(t *testing.
 		HasServerPlayerID: true,
 		Hand:              "right",
 		MultiplayerState:  protocol.StateReady,
-		Torque:            17.0,
+		MachineTorque:     17.0,
 	})
 
 	waitUntil(t, 3*time.Second, func() bool {
@@ -440,7 +444,7 @@ func TestMachineBridge_SafetyResetOnUpstreamDropAndStuckWaitingClear(t *testing.
 	})
 }
 
-// Frames as current machine firmware sends them to its local server, before the server adds
+// Frames as machine firmware sends them to its local server, before the server adds
 // is_connected, client_id and last_message_timestamp.
 const (
 	firmwareFrameA = `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45.0,"right_limit":45.0,"peak_force":28.0,"timeStamp":123456790}}`
@@ -468,7 +472,10 @@ const ourServerRivalFrame = `{
   }
 }`
 
-func TestEndToEnd_MachineTorqueFramesCrossOurServerUnchanged(t *testing.T) {
+// Machine A's player uses the left hand and machine B's the right, so each local server reverses
+// the sign of machine_torque in what it relays (PROTOCOL.md section 4.3). Our server therefore
+// receives it reversed, and the rival's local server reverses it back.
+func TestEndToEnd_MachineTorqueCrossesOurServerAndArrivesAsTheRivalSentIt(t *testing.T) {
 	cabinetA := startTestCabinet(t)
 	cabinetB := startTestCabinet(t)
 	ourServer := startTestCentralRelayServer(t)
@@ -491,15 +498,12 @@ func TestEndToEnd_MachineTorqueFramesCrossOurServerUnchanged(t *testing.T) {
 	writeText(t, physA, firmwareFrameA)
 	writeText(t, physB, firmwareFrameB)
 
-	// Machine -> our server. The hands differ, so the local servers also add opponent_torque -0.0
-	// to what they relay to the bridges.
-	for _, tc := range []struct{ machineID, playerID, want string }{
-		{"cabinet-A", "player-2", `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45,"right_limit":45,"peak_force":28,"timeStamp":123456790}}`},
-		{"cabinet-B", "player-1", `{"data":{"MAC_address":"AA:BB:CC:DD:EE:01","player_id":"player-1","hand":"right","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":9.75,"position":2.5,"velocity":-0.2,"left_limit":-40,"right_limit":40,"peak_force":31.5,"timeStamp":555000111}}`},
+	// Machine -> our server, once each local server has both hands.
+	for _, tc := range []struct{ machineID, torque, want string }{
+		{"cabinet-A", `"machine_torque":12.5,`, `{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":12.5,"position":-3.1,"velocity":0.4,"left_limit":-45,"right_limit":45,"peak_force":28,"timeStamp":123456790}}`},
+		{"cabinet-B", `"machine_torque":-9.75,`, `{"data":{"MAC_address":"AA:BB:CC:DD:EE:01","player_id":"player-1","hand":"right","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-9.75,"position":2.5,"velocity":-0.2,"left_limit":-40,"right_limit":40,"peak_force":31.5,"timeStamp":555000111}}`},
 	} {
-		got := waitForFrame(t, ourServer.FramesFrom(tc.machineID), 3*time.Second, func(s string) bool {
-			return strings.Contains(s, `"`+tc.playerID+`"`)
-		})
+		got := waitForFrame(t, ourServer.FramesFrom(tc.machineID), 3*time.Second, contains(tc.torque))
 		if got != tc.want {
 			t.Errorf("our server received from %s\n got: %s\nwant: %s", tc.machineID, got, tc.want)
 		}
@@ -507,10 +511,10 @@ func TestEndToEnd_MachineTorqueFramesCrossOurServerUnchanged(t *testing.T) {
 
 	// Our server -> machine.
 	assertMachineReceivedRival(t, waitForFrame(t, framesAtB, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, `"player-2"`)
+		return strings.Contains(s, `"player-2"`) && strings.Contains(s, `"machine_torque":-12.5,`)
 	}), firmwareFrameA)
 	assertMachineReceivedRival(t, waitForFrame(t, framesAtA, 3*time.Second, func(s string) bool {
-		return strings.Contains(s, `"player-1"`)
+		return strings.Contains(s, `"player-1"`) && strings.Contains(s, `"machine_torque":9.75,`)
 	}), firmwareFrameB)
 }
 
@@ -537,10 +541,12 @@ func TestMachineBridge_RivalFromOurServerReachesMachineAndClearsWhenOurServerGoe
 	waitUntil(t, 3*time.Second, func() bool {
 		return cabinet.MatchState() == protocol.ServerWaiting
 	})
+	// The machine's player uses the right hand and the rival the left, so the local server reverses
+	// the sign of the rival's machine_torque (PROTOCOL.md section 4.3).
 	feed.Set(ourServerRivalFrame)
 	assertMachineReceivedRival(t, waitForFrame(t, frames, 3*time.Second, func(s string) bool {
 		return strings.Contains(s, protocol.StateRun)
-	}), ourServerRivalFrame)
+	}), withField(ourServerRivalFrame, `"machine_torque": -12.5`, `"machine_torque": 12.5`))
 
 	expectNoFrame(t, frames, 3*rivalTimeout, func(s string) bool {
 		return s == `{"data":{}}`
@@ -713,7 +719,8 @@ func (f *ourServerFeed) Stop() time.Time {
 }
 
 // assertMachineReceivedRival checks that a frame the local server relayed to a physical machine
-// carries every field of the rival's frame unchanged, apart from the fields servers add.
+// carries every field of rivalFrame with the same value, apart from the fields servers add, and
+// no other torque field.
 func assertMachineReceivedRival(t *testing.T, relayed, rivalFrame string) {
 	t.Helper()
 	var got, sent struct {
@@ -734,12 +741,10 @@ func assertMachineReceivedRival(t *testing.T, relayed, rivalFrame string) {
 			t.Errorf("machine received %s = %v, want %v\nframe: %s", k, got.Data[k], v, relayed)
 		}
 	}
-	if v, ok := got.Data["torque"]; ok {
-		t.Errorf("machine received torque %v that the rival never sent\nframe: %s", v, relayed)
-	}
-	// The local server's section 4.3 sign rule adds opponent_torque -0.0 when the hands differ.
-	if v, ok := got.Data["opponent_torque"]; ok && v != 0.0 {
-		t.Errorf("machine received opponent_torque %v that the rival never sent\nframe: %s", v, relayed)
+	for _, gone := range []string{"torque", "opponent_torque"} {
+		if v, ok := got.Data[gone]; ok {
+			t.Errorf("machine received %s = %v; machine_torque is the only torque field\nframe: %s", gone, v, relayed)
+		}
 	}
 }
 

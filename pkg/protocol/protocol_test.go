@@ -9,7 +9,7 @@ import (
 	"github.com/Interacting-Tech/tmp/pkg/protocol"
 )
 
-// machineTorqueFrame is a frame from current machine firmware as relayed by a server
+// machineTorqueFrame is a machine's frame as relayed by a server
 // (the machine's local server, or our server relaying the rival).
 const machineTorqueFrame = `{
   "data": {
@@ -37,7 +37,7 @@ const machineTorqueForwarded = `{"data":{"MAC_address":"11:22:33:44:55:66","play
 
 func forwardLocalFrame(t *testing.T, raw string) string {
 	t.Helper()
-	msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false, "right", true)
+	msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false)
 	if !ok || msg.Kind != protocol.InboundTelemetry || !msg.Telemetry.HasMachineTelemetry {
 		t.Fatalf("expected machine telemetry from local server frame %s, got %+v", raw, msg)
 	}
@@ -79,12 +79,11 @@ func TestMachineTorqueFrame_ForwardedBothWaysWithSameFieldsAndValues(t *testing.
 func TestParseServerMessage_LoneZeroTorqueIsTheSection44DisconnectFrame(t *testing.T) {
 	for _, raw := range []string{
 		`{"data":{}}`,
-		`{"data":{"opponent_torque":-0.0}}`,
 		`{"data":{"machine_torque":-0.0}}`,
 		// A field with an unexpected type sends decoding through the per-field fallback path.
 		`{"data":{"machine_torque":"-0.0"}}`,
 	} {
-		msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false, "", true)
+		msg, ok := protocol.ParseServerMessage([]byte(raw), "", 0, false)
 		if raw == `{"data":{"machine_torque":"-0.0"}}` {
 			if !ok || msg.Kind != protocol.InboundTelemetry || !msg.Telemetry.HasMachineTelemetry {
 				t.Errorf("%s: a non-numeric machine_torque is not the disconnect frame, got %+v", raw, msg)
@@ -96,28 +95,20 @@ func TestParseServerMessage_LoneZeroTorqueIsTheSection44DisconnectFrame(t *testi
 		}
 	}
 
-	msg, ok := protocol.ParseServerMessage([]byte(`{"data":{"machine_torque":0,"hand":"left"}}`), "", 0, false, "", true)
+	msg, ok := protocol.ParseServerMessage([]byte(`{"data":{"machine_torque":0,"hand":"left"}}`), "", 0, false)
 	if !ok || !msg.Telemetry.HasMachineTelemetry {
 		t.Errorf("a zero machine_torque next to other machine fields is machine telemetry, got %+v", msg)
 	}
 }
 
-func TestMachineTorqueFrame_DropsLegacySignRuleArtifactKeepsRealTorqueFields(t *testing.T) {
-	withArtifact := strings.Replace(machineTorqueFrame,
-		`"machine_torque": -12.5,`, `"machine_torque": -12.5, "opponent_torque": -0.0,`, 1)
-	if got := forwardLocalFrame(t, withArtifact); got != machineTorqueForwarded {
-		t.Fatalf("local frame with sign-rule artifact\n got: %s\nwant: %s", got, machineTorqueForwarded)
+func TestMachineTorqueFrame_MissingMachineTorqueDefaultsToZero(t *testing.T) {
+	withoutTorque := strings.Replace(machineTorqueFrame, `"machine_torque": -12.5,`, ``, 1)
+	want := strings.Replace(machineTorqueForwarded, `"machine_torque":-12.5`, `"machine_torque":0`, 1)
+	if got := forwardLocalFrame(t, withoutTorque); got != want {
+		t.Fatalf("local frame without machine_torque\n got: %s\nwant: %s", got, want)
 	}
-	if got := forwardRivalFrame(t, withArtifact); got != machineTorqueForwarded {
-		t.Fatalf("rival frame with sign-rule artifact\n got: %s\nwant: %s", got, machineTorqueForwarded)
-	}
-
-	withLegacyFields := strings.Replace(machineTorqueFrame,
-		`"machine_torque": -12.5,`, `"machine_torque": -12.5, "torque": 7.5, "opponent_torque": 3.25,`, 1)
-	want := strings.Replace(machineTorqueForwarded,
-		`"machine_torque":-12.5,`, `"machine_torque":-12.5,"torque":7.5,"opponent_torque":3.25,`, 1)
-	if got := forwardRivalFrame(t, withLegacyFields); got != want {
-		t.Fatalf("rival frame with real legacy torque fields\n got: %s\nwant: %s", got, want)
+	if got := forwardRivalFrame(t, withoutTorque); got != want {
+		t.Fatalf("rival frame without machine_torque\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -130,8 +121,7 @@ func TestMarshalMachineEnvelope_ExactProtocolFormatAndSanitization(t *testing.T)
 		Hand:              "RIGHT",
 		MultiplayerState:  protocol.StateRun,
 		SinglePlayerState: "",
-		Torque:            12.5,
-		OpponentTorque:    10.2,
+		MachineTorque:     12.5,
 		Position:          3.1,
 		Velocity:          -0.4,
 		LeftLimit:         -45.0,
@@ -169,6 +159,14 @@ func TestMarshalMachineEnvelope_ExactProtocolFormatAndSanitization(t *testing.T)
 	if got := data["hand"]; got != "right" {
 		t.Errorf("hand = %v", got)
 	}
+	if got := data["machine_torque"]; got != 12.5 {
+		t.Errorf("machine_torque = %v, want 12.5", got)
+	}
+	for _, gone := range []string{"torque", "opponent_torque"} {
+		if _, exists := data[gone]; exists {
+			t.Errorf("outbound machine envelope contains %q; machine_torque is the only torque field", gone)
+		}
+	}
 	if got := data["peak_force"]; got != float64(0) {
 		t.Errorf("sanitized peak_force = %v, want 0", got)
 	}
@@ -193,8 +191,8 @@ func TestMarshalMachineEnvelope_ExactProtocolFormatAndSanitization(t *testing.T)
 
 func TestParseRivalEnvelope_AlphabeticalFirstKeyAndDefaults(t *testing.T) {
 	raw := []byte(`{
-		"zeta": {"player_id": "wrong", "torque": 999},
-		"alpha": {"player_id": "rival-ok", "torque": 19.25, "extra_num": 7}
+		"zeta": {"player_id": "wrong", "machine_torque": 999},
+		"alpha": {"player_id": "rival-ok", "machine_torque": 19.25, "extra_num": 7}
 	}`)
 
 	parsed, ok := protocol.ParseRivalEnvelope(raw)
@@ -204,8 +202,8 @@ func TestParseRivalEnvelope_AlphabeticalFirstKeyAndDefaults(t *testing.T) {
 	if parsed.PlayerID != "rival-ok" {
 		t.Fatalf("PlayerID = %q, want rival-ok", parsed.PlayerID)
 	}
-	if parsed.Torque != 19.25 {
-		t.Fatalf("Torque = %v, want 19.25", parsed.Torque)
+	if parsed.MachineTorque != 19.25 {
+		t.Fatalf("MachineTorque = %v, want 19.25", parsed.MachineTorque)
 	}
 	if parsed.MACAddress != "" || parsed.Hand != "" || parsed.MultiplayerState != "" || parsed.TimeStamp != 0 {
 		t.Fatalf("unexpected defaults: %+v", parsed)
@@ -217,7 +215,7 @@ func TestParseRivalEnvelope_AlphabeticalFirstKeyAndDefaults(t *testing.T) {
 	// Reject empty/disconnect/malformed frames
 	for _, invalid := range [][]byte{
 		[]byte(`{"data":{}}`),
-		[]byte(`{"data":{"opponent_torque":-0.0}}`),
+		[]byte(`{"data":{"machine_torque":-0.0}}`),
 		[]byte(`{"cmd":"STOP"}`),
 		[]byte(`{bad json`),
 		[]byte(`{"data":{"player_id":"x"}} trailing`),
@@ -234,7 +232,6 @@ func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
 		`{"data":{"is_connected":false}}`,
 		`{"data":{"is_connected":false,"client_id":2,"last_message_timestamp":86400123}}`,
 		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}`,
-		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123,"opponent_torque":-0.0}}`,
 		`{"data":{"is_connected":true,"client_id":2,"last_message_timestamp":86400123,"machine_torque":-0.0}}`,
 		`{"data":{"machine_torque":-0.0}}`,
 		// A field with an unexpected type sends decoding through the per-field fallback path.
@@ -250,7 +247,6 @@ func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
 		`{"data":{"multiplayer_state":"MULTIPLAYER_SM_READY","is_connected":true,"client_id":2}}`,
 		`{"data":{"machine_torque":0,"position":0,"is_connected":true}}`,
 		`{"data":{"machine_torque":-2.5}}`,
-		`{"data":{"torque":0,"opponent_torque":0}}`,
 	} {
 		if rival, ok := protocol.ParseRivalEnvelope([]byte(raw)); !ok || rival == nil {
 			t.Errorf("ParseRivalEnvelope rejected a frame with rival data: %s", raw)
@@ -258,9 +254,9 @@ func TestParseRivalEnvelope_RejectsRelayedFramesWithoutRivalData(t *testing.T) {
 	}
 }
 
-func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
+func TestParseServerMessage_CommandsDisconnectsAndCaching(t *testing.T) {
 	// Match commands (section 6.2)
-	msg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"START":1}}`), "", 0, false, "", true)
+	msg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"START":1}}`), "", 0, false)
 	if !ok || msg.Kind != protocol.InboundCommand || msg.Command.Kind != protocol.CommandStart || msg.Command.IsOperatorCommand {
 		t.Fatalf("unexpected START parse: %+v", msg)
 	}
@@ -268,7 +264,7 @@ func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 		t.Fatalf("START means the local machine reported %q, want %q", got, protocol.StateReady)
 	}
 
-	loseMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_LOSE":1}}`), "", 0, false, "", true)
+	loseMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_LOSE":1}}`), "", 0, false)
 	if !ok || loseMsg.Command.Kind != protocol.CommandYouLose || loseMsg.Command.InferredLocalGameOverState() != protocol.StateGameOverWin {
 		t.Fatalf("unexpected YOU_LOSE parse: %+v", loseMsg)
 	}
@@ -276,13 +272,13 @@ func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 		t.Fatalf("YOU_LOSE means the local machine reported %q, want %q", got, protocol.StateGameOverWin)
 	}
 
-	winMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_WIN":0}}`), "", 0, false, "", true)
+	winMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":{"YOU_WIN":0}}`), "", 0, false)
 	if !ok || winMsg.Command.Kind != protocol.CommandYouWin || winMsg.Command.InferredLocalGameOverState() != protocol.StateGameOverLose {
 		t.Fatalf("unexpected YOU_WIN parse: %+v", winMsg)
 	}
 
 	// Operator commands (section 6.3)
-	stopMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"STOP"}`), "", 0, false, "", true)
+	stopMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"STOP"}`), "", 0, false)
 	if !ok || stopMsg.Command.Kind != protocol.CommandStop || !stopMsg.Command.IsOperatorCommand {
 		t.Fatalf("unexpected STOP parse: %+v", stopMsg)
 	}
@@ -290,35 +286,35 @@ func TestParseServerMessage_CommandsDisconnectsTorqueAndCaching(t *testing.T) {
 		t.Fatalf("STOP says nothing about the local machine's state, got %q", got)
 	}
 
-	opMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"CALIB"}`), "", 0, false, "", true)
+	opMsg, ok := protocol.ParseServerMessage([]byte(`{"cmd":"CALIB"}`), "", 0, false)
 	if !ok || opMsg.Command.Kind != protocol.CommandOperatorText || opMsg.Command.CommandText != "CALIB" {
 		t.Fatalf("unexpected operator cmd parse: %+v", opMsg)
 	}
 
-	// Empty and section 4.4 left-hand disconnect {"data":{"opponent_torque":-0.0}}
+	// Empty and section 4.4 left-hand disconnect {"data":{"machine_torque":-0.0}}
 	for _, disc := range [][]byte{
 		[]byte(`{"data":{}}`),
-		[]byte(`{"data":{"opponent_torque":-0.0}}`),
+		[]byte(`{"data":{"machine_torque":-0.0}}`),
 	} {
-		m, ok := protocol.ParseServerMessage(disc, "cached", 500, true, "left", true)
+		m, ok := protocol.ParseServerMessage(disc, "cached", 500, true)
 		if !ok || m.Telemetry.HasMachineTelemetry || m.Telemetry.IsConnected {
 			t.Fatalf("expected disconnect snapshot for %s, got %+v", disc, m)
 		}
 	}
 
-	// Frame 50 (contains server_player_id) + opposite-hand torque unflip
-	f50 := []byte(`{"data":{"player_id":"p1","server_player_id":"sp-50","hand":"left","opponent_torque":-16.5,"is_connected":true,"client_id":1,"last_message_timestamp":4200}}`)
-	m50, ok := protocol.ParseServerMessage(f50, "", 0, false, "right", true)
+	// Frame 50 (contains server_player_id). The torque is passed on as the local server relayed it.
+	f50 := []byte(`{"data":{"player_id":"p1","server_player_id":"sp-50","hand":"left","machine_torque":-16.5,"is_connected":true,"client_id":1,"last_message_timestamp":4200}}`)
+	m50, ok := protocol.ParseServerMessage(f50, "", 0, false)
 	if !ok || !m50.Telemetry.IsNewSample || m50.Telemetry.EffectiveServerPlayerID != "sp-50" {
 		t.Fatalf("unexpected f50 parse: %+v", m50)
 	}
-	if m50.Telemetry.NormalizedTelemetry.OpponentTorque != 16.5 {
-		t.Fatalf("Normalized OpponentTorque = %v, want +16.5", m50.Telemetry.NormalizedTelemetry.OpponentTorque)
+	if got := m50.Telemetry.NormalizedTelemetry.MachineTorque; got != -16.5 {
+		t.Fatalf("MachineTorque = %v, want -16.5", got)
 	}
 
 	// Frame 51 (omits server_player_id, same timestamp -> IsNewSample=false, keeps sp-50)
-	f51 := []byte(`{"data":{"player_id":"p1","hand":"left","opponent_torque":-16.5,"is_connected":true,"client_id":1,"last_message_timestamp":4200}}`)
-	m51, ok := protocol.ParseServerMessage(f51, m50.Telemetry.EffectiveServerPlayerID, m50.Telemetry.LastMessageTimestamp, true, "right", true)
+	f51 := []byte(`{"data":{"player_id":"p1","hand":"left","machine_torque":-16.5,"is_connected":true,"client_id":1,"last_message_timestamp":4200}}`)
+	m51, ok := protocol.ParseServerMessage(f51, m50.Telemetry.EffectiveServerPlayerID, m50.Telemetry.LastMessageTimestamp, true)
 	if !ok || m51.Telemetry.IsNewSample || m51.Telemetry.FrameContainedServerPlayerID {
 		t.Fatalf("unexpected f51 sample flags: %+v", m51.Telemetry)
 	}
@@ -335,8 +331,7 @@ func BenchmarkAppendMachineEnvelope(b *testing.B) {
 		HasServerPlayerID: true,
 		Hand:              "right",
 		MultiplayerState:  protocol.StateRun,
-		Torque:            24.5,
-		OpponentTorque:    19.25,
+		MachineTorque:     24.5,
 		Position:          4.2,
 		Velocity:          -0.8,
 		LeftLimit:         -45.0,
@@ -353,10 +348,10 @@ func BenchmarkAppendMachineEnvelope(b *testing.B) {
 }
 
 func BenchmarkParseServerMessage(b *testing.B) {
-	frame := []byte(`{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","torque":10.2,"opponent_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45.0,"right_limit":45.0,"peak_force":28.0,"timeStamp":123456790,"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}`)
+	frame := []byte(`{"data":{"MAC_address":"11:22:33:44:55:66","player_id":"player-2","hand":"left","multiplayer_state":"MULTIPLAYER_SM_RUN","single_player_state":"","machine_torque":-12.5,"position":-3.1,"velocity":0.4,"left_limit":-45.0,"right_limit":45.0,"peak_force":28.0,"timeStamp":123456790,"is_connected":true,"client_id":2,"last_message_timestamp":86400123}}`)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = protocol.ParseServerMessage(frame, "abc123", 86400120, true, "right", true)
+		_, _ = protocol.ParseServerMessage(frame, "abc123", 86400120, true)
 	}
 }

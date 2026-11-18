@@ -463,7 +463,7 @@ func (u *WebSocketServerClient) readLoop(
 		}
 
 		// 2. Otherwise inspect via ParseServerMessage for {"data":{}} disconnect or {"cmd":"STOP"}
-		parsed, ok := protocol.ParseServerMessage(raw, "", 0, false, "", false)
+		parsed, ok := protocol.ParseServerMessage(raw, "", 0, false)
 		upstreamReadPool.Put(buf)
 		if !ok || parsed == nil {
 			continue

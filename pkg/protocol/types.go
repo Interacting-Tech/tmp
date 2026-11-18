@@ -12,22 +12,15 @@ type MachineTelemetry struct {
 	Hand              string
 	MultiplayerState  string
 	SinglePlayerState string
-	// MachineTorque is the handle torque that current machine firmware sends instead of Torque and
-	// OpponentTorque. While HasMachineTorque is set, Torque and OpponentTorque are only serialized
-	// when their Has flags are set; otherwise both are always serialized (legacy frames).
-	MachineTorque     float64
-	HasMachineTorque  bool
-	Torque            float64
-	HasTorque         bool
-	OpponentTorque    float64
-	HasOpponentTorque bool
-	Position          float64
-	Velocity          float64
-	LeftLimit         float64
-	RightLimit        float64
-	PeakForce         float64
-	TimeStamp         uint64
-	ExtraFields       map[string]json.RawMessage
+	// MachineTorque is the machine's handle torque, the only torque value in the protocol.
+	MachineTorque float64
+	Position      float64
+	Velocity      float64
+	LeftLimit     float64
+	RightLimit    float64
+	PeakForce     float64
+	TimeStamp     uint64
+	ExtraFields   map[string]json.RawMessage
 }
 
 // Clone returns a deep copy of t with normalized hand/float values and server-injected
@@ -40,8 +33,6 @@ func (t *MachineTelemetry) Clone() *MachineTelemetry {
 	cp := *t
 	cp.Hand = NormalizeHand(t.Hand)
 	cp.MachineTorque = SanitizeFloat(t.MachineTorque)
-	cp.Torque = SanitizeFloat(t.Torque)
-	cp.OpponentTorque = SanitizeFloat(t.OpponentTorque)
 	cp.Position = SanitizeFloat(t.Position)
 	cp.Velocity = SanitizeFloat(t.Velocity)
 	cp.LeftLimit = SanitizeFloat(t.LeftLimit)
@@ -121,7 +112,7 @@ func (c ServerCommand) InferredLocalMatchState() string {
 // ReceivedMachineData captures a 10 ms telemetry frame received from the local server (section 6.1).
 type ReceivedMachineData struct {
 	// HasMachineTelemetry is false when the server sent {"data":{}} or the section 4.4
-	// {"data":{"opponent_torque":-0.0}} disconnect frame.
+	// {"data":{"machine_torque":-0.0}} disconnect frame.
 	HasMachineTelemetry          bool
 	IsConnected                  bool
 	ClientID                     int
