@@ -1,21 +1,24 @@
-# Arm-Wrestling Machine Bridge (Go)
+# Arm-Wrestling Machine Bridge and Battle Server (Go)
 
-Fast, low-jitter, zero-CGO Go daemon (`machine-bridge`) that runs on each physical arm-wrestling machine, connects to the machine's local WebSocket server (`ws://<machine-ip>:8080/ws?role=machine`) per `PROTOCOL.md`, streams the machine's data to our central server, and transfers the rival's data from our server back into the machine.
+Two programs that let arm-wrestling machines in different places battle each other:
+
+- **`machine-bridge`** runs on each physical arm-wrestling machine. It connects to the machine's local WebSocket server (`ws://<machine-ip>:8080/ws?role=machine`) per `PROTOCOL.md`, streams the machine's data to our central server, and transfers the rival's data from our server back into the machine.
+- **`battle-server`** is our central server. Every bridge connects to it; it pairs machines and relays each machine's data to its rival.
 
 ## Architecture
 
 ```text
-[Physical Machine]
-        ▲ │  ws://<machine-ip>:8080/ws?role=machine  (PROTOCOL.md)
-        │ ▼
-[Local Machine Server (:8080)]
-        ▲ │  ws://<machine-ip>:8080/ws?role=machine  (TCP_NODELAY, 10 ms telemetry + cmd)
-        │ ▼
-[machine-bridge (Go)]
-        ▲ │  ws(s)://<our-server>/...                (TCP_NODELAY, WS ping/pong watchdog)
-        │ ▼
-[Our Central Server]
+[Physical Machine A]                                  [Physical Machine B]
+        ▲ │  PROTOCOL.md                                      ▲ │
+        │ ▼                                                   │ ▼
+[Local Machine Server A (:8080)]                      [Local Machine Server B (:8080)]
+        ▲ │  ws://<machine-ip>:8080/ws?role=machine           ▲ │
+        │ ▼                                                   │ ▼
+[machine-bridge A] ──────► [battle-server] ◄────── [machine-bridge B]
+                    ws(s)://<our-server>/ws/machine
 ```
+
+Each local machine server pairs its physical machine with the bridge, which stands in for the rival. The battle itself (ready, start, win/lose) is run by each local server exactly as `PROTOCOL.md` describes. The battle server only decides who fights whom and carries the telemetry between them.
 
 ### Packages
 
@@ -29,12 +32,15 @@ Fast, low-jitter, zero-CGO Go daemon (`machine-bridge`) that runs on each physic
 - **`pkg/machineclient`** — Real-time local WebSocket client (`TCP_NODELAY`, pooled read/write buffers, panic-safe callbacks, write deadlines, exponential-backoff reconnect, latest-message-wins coalescing, non-droppable terminal `GAMEOVER_WIN`/`GAMEOVER_LOSE` delivery, and `ClearRival` slot cycling to clear stale rival torque and reset stuck `MULTIPLAYER_WAITING` / `MULTIPLAYER_MID_MATCH` to `MULTIPLAYER_IDLE`).
 - **`pkg/bridge`** — Bidirectional `MachineBridge` + `WebSocketServerClient` connecting the local machine to our central server with latest-message-wins WAN forwarding, RFC 6455 ping/pong dead-link detection, and automatic local `ClearRival` safety reset if the rival leaves or the upstream connection drops mid-match.
 - **`cmd/machine-bridge`** — Standalone CLI/service binary (~6.8 MB static executable).
+- **`pkg/battleserver`** — Our central server: pairs connected bridges and relays telemetry between the two machines of a battle.
+- **`cmd/battle-server`** — Standalone battle server binary.
 
 ## Build & Cross-Compile
 
 ```bash
 # Native build
 CGO_ENABLED=0 go build -o bin/machine-bridge ./cmd/machine-bridge
+CGO_ENABLED=0 go build -o bin/battle-server ./cmd/battle-server
 
 # Linux ARM64 (e.g. Raspberry Pi / embedded cabinet)
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/machine-bridge-linux-arm64 ./cmd/machine-bridge
@@ -45,6 +51,39 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/machine-bridge-linux-amd64
 # Windows x86_64
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/machine-bridge-windows-amd64.exe ./cmd/machine-bridge
 ```
+
+## Run a Battle Between Two Machines
+
+1. Start the battle server on a host both machines can reach:
+
+```bash
+./bin/battle-server --listen :9000 --auth-token "$OUR_SERVER_TOKEN"
+```
+
+2. Start a bridge on each machine, each with its own `--machine-id`:
+
+```bash
+./bin/machine-bridge \
+  --server-url ws://our-server.example.com:9000/ws/machine \
+  --machine-id cabinet-01 \
+  --auth-token "$OUR_SERVER_TOKEN"
+```
+
+3. The server logs `battle ready: "cabinet-01" vs "cabinet-02"` once both bridges are connected. From then on each machine sees the other as its rival: when both players report `MULTIPLAYER_SM_READY`, each local server sends `START`, and the handles reflect each other until one machine reports a result.
+
+### Battle server (stage 1)
+
+- **Pairing:** machines without a rival are paired in the order they became free. With two machines connected, they battle each other. A third machine waits until one is free. A pair stays together, including for rematches, until one bridge disconnects.
+- **Rival leaves:** the remaining machine is sent `{"data":{}}`, which clears its rival and abandons its battle, before it is paired again.
+- **Relay:** only machine telemetry is relayed. Telemetry is latest-wins, so a slow connection never builds up a backlog of old handle positions. A win/lose result is always delivered.
+- **Reconnects:** a bridge that reconnects with the same `--machine-id` replaces its previous connection. A bridge that sends neither data nor pings for 30 s is dropped.
+- **Options:** `--listen` (default `:9000`, env `BATTLE_SERVER_LISTEN`), `--path` (default `/ws/machine`), `--auth-token` (env `OUR_SERVER_TOKEN`). `GET /healthz` answers `ok`.
+
+Not in stage 1:
+
+- **Matching:** there is no way to choose which machines battle. Pairing is first come, first served.
+- **Encryption:** the server speaks plain `ws://`. For use over the internet, put it behind a TLS-terminating proxy so bridges can connect with `wss://`; otherwise the token and telemetry travel unencrypted.
+- **Per-machine credentials:** all bridges share one token, and any bridge holding it can connect under any machine ID.
 
 ## Run on the Machine
 
