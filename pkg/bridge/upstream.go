@@ -70,6 +70,12 @@ type UpstreamOptions struct {
 	// MaxInboundBytes caps incoming frame size from our server (default: 64 KiB).
 	MaxInboundBytes int64
 
+	// RivalTimeout clears the rival on the machine when our server relays no rival data for this
+	// long while a rival is active (default: 1s; negative disables). The local server keeps relaying
+	// the last rival frame indefinitely, so without it a stalled link would leave the handle
+	// reflecting a frozen rival until PongTimeout expires.
+	RivalTimeout time.Duration
+
 	// Callbacks
 	OnConnectionChange func(connected bool)
 	OnDiagnostic       func(msg string, err error)
@@ -98,6 +104,9 @@ func (o UpstreamOptions) withDefaults() UpstreamOptions {
 	if out.MaxInboundBytes <= 0 {
 		out.MaxInboundBytes = 64 * 1024
 	}
+	if out.RivalTimeout == 0 {
+		out.RivalTimeout = time.Second
+	}
 	return out
 }
 
@@ -112,14 +121,14 @@ type WebSocketServerClient struct {
 	cancelRun   context.CancelFunc
 	runDone     chan struct{}
 
-	outMu               sync.Mutex
-	latestPayload       []byte
-	hasUnsentLatest     bool
-	priorityPayloads    [][]byte
-	sendWake            chan struct{}
-	activeConn          *websocket.Conn
-	writeMu             sync.Mutex
-	connected           atomic.Bool
+	outMu            sync.Mutex
+	latestPayload    []byte
+	hasUnsentLatest  bool
+	priorityPayloads [][]byte
+	sendWake         chan struct{}
+	activeConn       *websocket.Conn
+	writeMu          sync.Mutex
+	connected        atomic.Bool
 }
 
 // NewWebSocketServerClient creates an upstream transport to our server.
@@ -316,14 +325,15 @@ func (u *WebSocketServerClient) runSession(parentCtx context.Context, handlers U
 	u.setConnected(true)
 
 	var (
-		wg           sync.WaitGroup
-		hadRivalData atomic.Bool
+		wg sync.WaitGroup
+		// lastRivalAt is the monoNow time of the latest rival frame while a rival is active, else 0.
+		lastRivalAt atomic.Int64
 	)
 	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
-		u.readLoop(sessCtx, conn, handlers, &hadRivalData)
+		u.readLoop(sessCtx, conn, handlers, &lastRivalAt)
 		sessCancel()
 	}()
 
@@ -339,6 +349,14 @@ func (u *WebSocketServerClient) runSession(parentCtx context.Context, handlers U
 		sessCancel()
 	}()
 
+	if u.opts.RivalTimeout > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u.rivalWatchdog(sessCtx, handlers, &lastRivalAt)
+		}()
+	}
+
 	<-sessCtx.Done()
 	_ = conn.Close()
 	wg.Wait()
@@ -350,18 +368,54 @@ func (u *WebSocketServerClient) runSession(parentCtx context.Context, handlers U
 	u.setConnected(false)
 
 	// Safety: if our server disconnects while a rival was active, immediately clear rival torque on the machine!
-	if hadRivalData.Load() && handlers.OnRivalDisconnected != nil {
+	if lastRivalAt.Load() != 0 && handlers.OnRivalDisconnected != nil {
 		handlers.OnRivalDisconnected()
 	}
 
 	return true
 }
 
+func (u *WebSocketServerClient) rivalWatchdog(
+	ctx context.Context,
+	handlers UpstreamHandlers,
+	lastRivalAt *atomic.Int64,
+) {
+	timeout := int64(u.opts.RivalTimeout)
+	ticker := time.NewTicker(max(u.opts.RivalTimeout/10, 5*time.Millisecond))
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		last := lastRivalAt.Load()
+		if last == 0 || monoNow()-last < timeout || !lastRivalAt.CompareAndSwap(last, 0) {
+			continue
+		}
+		if u.opts.OnDiagnostic != nil {
+			u.opts.OnDiagnostic(fmt.Sprintf("no rival data from our server for %v; clearing rival", u.opts.RivalTimeout), nil)
+		}
+		if handlers.OnRivalDisconnected != nil {
+			handlers.OnRivalDisconnected()
+		}
+	}
+}
+
+var monoEpoch = time.Now()
+
+// monoNow returns a positive monotonic timestamp in nanoseconds, immune to wall-clock steps.
+func monoNow() int64 {
+	return int64(time.Since(monoEpoch)) + 1
+}
+
 func (u *WebSocketServerClient) readLoop(
 	ctx context.Context,
 	conn *websocket.Conn,
 	handlers UpstreamHandlers,
-	hadRivalData *atomic.Bool,
+	lastRivalAt *atomic.Int64,
 ) {
 	for {
 		if ctx.Err() != nil {
@@ -400,7 +454,7 @@ func (u *WebSocketServerClient) readLoop(
 
 		// 1. Check if our server sentrival telemetry in PROTOCOL.md format
 		if rivalTelemetry, ok := protocol.ParseRivalEnvelope(raw); ok && rivalTelemetry != nil {
-			hadRivalData.Store(true)
+			lastRivalAt.Store(monoNow())
 			upstreamReadPool.Put(buf)
 			if handlers.OnRivalTelemetry != nil {
 				handlers.OnRivalTelemetry(rivalTelemetry)
@@ -417,14 +471,14 @@ func (u *WebSocketServerClient) readLoop(
 
 		switch parsed.Kind {
 		case protocol.InboundTelemetry:
-			if parsed.Telemetry != nil && !parsed.Telemetry.HasMachineTelemetry && hadRivalData.Swap(false) {
+			if parsed.Telemetry != nil && !parsed.Telemetry.HasMachineTelemetry && lastRivalAt.Swap(0) != 0 {
 				if handlers.OnRivalDisconnected != nil {
 					handlers.OnRivalDisconnected()
 				}
 			}
 		case protocol.InboundCommand:
 			if parsed.Command != nil && parsed.Command.Kind == protocol.CommandStop {
-				hadRivalData.Store(false)
+				lastRivalAt.Store(0)
 				if handlers.OnServerStopCommand != nil {
 					handlers.OnServerStopCommand()
 				} else if handlers.OnRivalDisconnected != nil {

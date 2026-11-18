@@ -28,9 +28,14 @@ type Config struct {
 	OutboundServerPlayerIDCadence int
 
 	// OnlyForwardNewSamples, when true, only sends telemetry to our server when last_message_timestamp
-	// advances (skipping duplicate 10ms server repeats unless MultiplayerState changed). Default: false.
+	// advances (skipping duplicate 10ms server repeats unless MultiplayerState changed), but still at
+	// least every onlyNewSamplesRefresh. Default: false.
 	OnlyForwardNewSamples bool
 }
+
+// onlyNewSamplesRefresh keeps an idle machine's frames reaching the rival's bridge well within the
+// rival bridge's RivalTimeout when OnlyForwardNewSamples skips repeats.
+const onlyNewSamplesRefresh = 250 * time.Millisecond
 
 // MachineBridge runs on the physical arm-wrestling machine:
 //  1. Resolves the local machine's IP and connects to ws://<machine-ip>:8080/ws?role=machine.
@@ -42,10 +47,11 @@ type MachineBridge struct {
 	cadence       uint64
 	onlyNew       bool
 
-	mu                  sync.Mutex
-	publishedFrames     uint64
-	lastPublishedState  string
-	clearingRival       atomic.Bool
+	mu                 sync.Mutex
+	publishedFrames    uint64
+	lastPublishedState string
+	lastPublishedAt    time.Time
+	clearingRival      atomic.Bool
 }
 
 // New creates a MachineBridge pairing a local machine client with an upstream ServerTransport.
@@ -143,9 +149,10 @@ func (b *MachineBridge) handleLocalMachineData(snap *protocol.ReceivedMachineDat
 	state := snap.NormalizedTelemetry.MultiplayerState
 	isTerminal := protocol.IsTerminalMatchState(state)
 
+	now := time.Now()
 	b.mu.Lock()
 	stateChanged := state != b.lastPublishedState
-	if b.onlyNew && !snap.IsNewSample && !stateChanged {
+	if b.onlyNew && !snap.IsNewSample && !stateChanged && now.Sub(b.lastPublishedAt) < onlyNewSamplesRefresh {
 		b.mu.Unlock()
 		return
 	}
@@ -153,6 +160,7 @@ func (b *MachineBridge) handleLocalMachineData(snap *protocol.ReceivedMachineDat
 	frameIdx := b.publishedFrames
 	alreadySentSameTerminal := isTerminal && !stateChanged
 	b.lastPublishedState = state
+	b.lastPublishedAt = now
 	b.mu.Unlock()
 
 	includeSPID := ((frameIdx - 1) % b.cadence) == 0
@@ -197,6 +205,7 @@ func (b *MachineBridge) handleLocalServerCommand(cmd protocol.ServerCommand) {
 	b.publishedFrames++
 	frameIdx := b.publishedFrames
 	b.lastPublishedState = inferred
+	b.lastPublishedAt = time.Now()
 	b.mu.Unlock()
 
 	synthesized := latest.NormalizedTelemetry.Clone()

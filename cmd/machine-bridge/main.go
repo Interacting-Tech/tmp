@@ -30,10 +30,16 @@ func main() {
 		machineNIC    = flag.String("interface", os.Getenv("MACHINE_NIC"), "Optional preferred network interface name (e.g. eth0, wlan0)")
 		machinePort   = flag.Int("machine-port", envInt("MACHINE_PORT", 8080), "Local machine WebSocket port (PROTOCOL.md default: 8080)")
 		allowLoopback = flag.Bool("allow-loopback", true, "Fall back to 127.0.0.1 if no active LAN IPv4 interface is up")
-		onlyNew       = flag.Bool("only-new-samples", false, "Only forward local frames to our server when last_message_timestamp changes")
+		onlyNew       = flag.Bool("only-new-samples", false, "Only forward local frames to our server when last_message_timestamp changes (plus a refresh every 250ms)")
+		rivalTimeout  = flag.Duration("rival-timeout", time.Second, "Clear the rival on the machine when our server sends no rival data for this long (0 disables)")
 		verbose       = flag.Bool("verbose", os.Getenv("VERBOSE") == "1", "Log every telemetry frame in standalone console mode")
 	)
 	flag.Parse()
+
+	upstreamRivalTimeout := *rivalTimeout
+	if upstreamRivalTimeout <= 0 {
+		upstreamRivalTimeout = -1
+	}
 
 	mcOpts := machineclient.Options{
 		Port:                  *machinePort,
@@ -69,8 +75,9 @@ func main() {
 		}
 
 		wsUp, err := bridge.NewWebSocketServerClient(bridge.UpstreamOptions{
-			ServerURL: trimmedURL,
-			Headers:   headers,
+			ServerURL:    trimmedURL,
+			Headers:      headers,
+			RivalTimeout: upstreamRivalTimeout,
 			OnConnectionChange: func(connected bool) {
 				log.Printf("[upstream-server] connected=%v url=%s", connected, trimmedURL)
 			},
