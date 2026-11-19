@@ -44,22 +44,22 @@ type Client struct {
 	cancelRun   context.CancelFunc
 	runDone     chan struct{}
 
-	rivalMu                  sync.Mutex
-	latestRival              *protocol.MachineTelemetry
-	cachedRivalServerPID     string
-	pendingTerminals         []*protocol.MachineTelemetry
-	hasUnsentRivalUpdate     bool
-	activeConn               *websocket.Conn
-	activeSessionCancel      context.CancelFunc
-	intentionalResetPending  bool
-	slotResetWaiters         []chan struct{}
-	writeMu                  sync.Mutex
-	sendWake                 chan struct{}
-	hasActiveRival           atomic.Bool
-	serverConnected          atomic.Bool
-	localMachineConnected    atomic.Bool
-	latestLocalData          atomic.Pointer[protocol.ReceivedMachineData]
-	latestCommand            atomic.Pointer[protocol.ServerCommand]
+	rivalMu                 sync.Mutex
+	latestRival             *protocol.MachineTelemetry
+	cachedRivalServerPID    string
+	pendingTerminals        []*protocol.MachineTelemetry
+	hasUnsentRivalUpdate    bool
+	activeConn              *websocket.Conn
+	activeSessionCancel     context.CancelFunc
+	intentionalResetPending bool
+	slotResetWaiters        []chan struct{}
+	writeMu                 sync.Mutex
+	sendWake                chan struct{}
+	hasActiveRival          atomic.Bool
+	serverConnected         atomic.Bool
+	localMachineConnected   atomic.Bool
+	latestLocalData         atomic.Pointer[protocol.ReceivedMachineData]
+	latestCommand           atomic.Pointer[protocol.ServerCommand]
 }
 
 // New creates a new local machine client, resolving the IPv4 address of the host machine
