@@ -33,6 +33,8 @@ Each local machine server pairs its physical machine with the bridge, which stan
 - **`cmd/machine-bridge`** — Standalone CLI/service binary (~6.8 MB static executable).
 - **`pkg/battleserver`** — Our central server: pairs connected bridges, relays telemetry between the two machines of a battle, and runs the battle rules.
 - **`cmd/battle-server`** — Standalone battle server binary.
+- **`pkg/machinesim`** — A simulated local `PROTOCOL.md` server and a simulated physical machine, used by the tests and the demo.
+- **`cmd/battle-demo`** — Runs battles between two simulated machines (see [Try a battle without machines](#try-a-battle-without-machines)).
 
 ## Build & Cross-Compile
 
@@ -50,6 +52,24 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/machine-bridge-linux-amd64
 # Windows x86_64
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/machine-bridge-windows-amd64.exe ./cmd/machine-bridge
 ```
+
+## Try a battle without machines
+
+```bash
+go run ./cmd/battle-demo
+```
+
+This runs two battles between two simulated machines and prints what happens: when each machine is told to start, a frame each machine sent next to the frame the other received, the battle server's decision, and which machine received `YOU_WIN` and `YOU_LOSE`. It exits with an error if anything is not as the [battle rules](#battle-rules) say.
+
+Each simulated machine sends a frame every 10 ms to its own simulated `PROTOCOL.md` server. The bridges and the battle server are the real ones. The simulated server and machine are built from `PROTOCOL.md`, so the demo shows that our programs follow the document, not that they work with the real machines.
+
+To run the same two simulated machines through a battle server that is already running:
+
+```bash
+go run ./cmd/battle-demo --server-url ws://our-server.example.com:9000/ws/machine --auth-token "$OUR_SERVER_TOKEN"
+```
+
+Only do this while no real machine is connected to that server. The server pairs machines in the order they connect, so a real machine waiting there would be paired with a simulated one; the demo stops when it sees that, before either simulated machine gets ready.
 
 ## Run a Battle Between Two Machines
 
