@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/machine-agent
+*.exe
+*.out
+*.test
+coverage.txt
+.idea/
+.vscode/
