@@ -1,7 +1,9 @@
 // battle-demo runs battles between two simulated arm-wrestling machines and prints what happens.
 //
-// Each simulated machine has its own simulated PROTOCOL.md server and a real machine bridge, and
-// the two bridges meet at a battle server: one this program starts, or yours with --server-url.
+// By default each simulated machine has its own simulated PROTOCOL.md server and a real machine
+// bridge, and the two bridges meet at a battle server. With --direct the simulated machines
+// connect to the battle server themselves. The battle server is one this program starts, or
+// yours with --server-url.
 package main
 
 import (
@@ -27,7 +29,11 @@ import (
 )
 
 type config struct {
-	// serverURL is the battle server the bridges connect to. Empty: the demo starts its own.
+	// direct connects the simulated machines to the battle server themselves, the way PROTOCOL.md
+	// section 2 describes, instead of through local servers and bridges.
+	direct bool
+	// serverURL is the battle server endpoint the bridges (or, with direct, the machines) connect
+	// to. Empty: the demo starts its own battle server.
 	serverURL string
 	authToken string
 	// winAtOppositeLimit configures the battle server the demo starts.
@@ -41,8 +47,9 @@ type config struct {
 
 func main() {
 	cfg := config{postMatch: 2 * time.Second, connectTimeout: 15 * time.Second}
-	flag.StringVar(&cfg.serverURL, "server-url", "", "Battle server to use, e.g. ws://host:9000/ws/machine (default: start one inside this program). Only use a server no real machine is connected to: the demo's machines are paired with whichever machine is waiting")
-	flag.StringVar(&cfg.authToken, "auth-token", os.Getenv("OUR_SERVER_TOKEN"), "Bearer token for --server-url")
+	flag.BoolVar(&cfg.direct, "direct", false, "Connect the simulated machines to the battle server themselves, with no local servers or bridges")
+	flag.StringVar(&cfg.serverURL, "server-url", "", "Battle server to use: ws://host:9000/ws/machine, or with --direct ws://host:8080/ws?role=machine (default: start one inside this program). Only use a server no real machine is connected to: the demo's machines are paired with whichever machine is waiting")
+	flag.StringVar(&cfg.authToken, "auth-token", os.Getenv("OUR_SERVER_TOKEN"), "Bearer token for --server-url (not used with --direct)")
 	flag.BoolVar(&cfg.winAtOppositeLimit, "win-at-opposite-limit", false, "Start the built-in battle server with --win-at-opposite-limit")
 	flag.Parse()
 
@@ -106,8 +113,12 @@ func run(cfg config, out io.Writer) error {
 		d.say("Battle server: %s", serverURL)
 	}
 	d.say("Machine A: left hand, limits -45 to 45. Machine B: right hand, limits -40 to 40.")
-	d.say("Each simulated machine sends a frame every 10 ms to its own simulated PROTOCOL.md server;")
-	d.say("a machine bridge connects each of those servers to the battle server.\n")
+	if cfg.direct {
+		d.say("Each simulated machine is connected to the battle server and sends it a frame every 10 ms.\n")
+	} else {
+		d.say("Each simulated machine sends a frame every 10 ms to its own simulated PROTOCOL.md server;")
+		d.say("a machine bridge connects each of those servers to the battle server.\n")
+	}
 
 	d.a = &player{name: "machine A", playerID: "demo-player-A", hand: protocol.HandLeft, left: -45, right: 45}
 	d.b = &player{name: "machine B", playerID: "demo-player-B", hand: protocol.HandRight, left: -40, right: 40}
@@ -173,28 +184,42 @@ func (d *demo) startBattleServer() (url string, stop func(), err error) {
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/ws/machine", battles)
+	mux.Handle("/ws", battles.MachineHandler())
 	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
 
-	return "ws://" + ln.Addr().String() + "/ws/machine", func() {
+	endpoint := "/ws/machine"
+	if d.cfg.direct {
+		endpoint = "/ws?role=machine"
+	}
+	return "ws://" + ln.Addr().String() + endpoint, func() {
 		_ = httpSrv.Close()
 		battles.Close()
 	}, nil
 }
 
 func (d *demo) startPlayer(p *player, serverURL, macAddress, machineID string) (stop func(), err error) {
-	loopback := net.IPv4(127, 0, 0, 1)
-	p.local, err = machinesim.StartLocalServer(loopback, d.cfg.postMatch)
-	if err != nil {
-		return nil, fmt.Errorf("start %s's local server: %w", p.name, err)
-	}
-	p.machine, err = machinesim.ConnectMachine(p.local.EndpointURL(), machinesim.MachineConfig{
+	machine := machinesim.MachineConfig{
 		MACAddress: macAddress,
 		PlayerID:   p.playerID,
 		Hand:       p.hand,
 		LeftLimit:  p.left,
 		RightLimit: p.right,
-	})
+	}
+	if d.cfg.direct {
+		p.machine, err = machinesim.ConnectMachine(serverURL, machine)
+		if err != nil {
+			return nil, fmt.Errorf("%w (with --direct, --server-url is the address machines connect to, e.g. ws://host:8080/ws?role=machine)", err)
+		}
+		return p.machine.Close, nil
+	}
+
+	loopback := net.IPv4(127, 0, 0, 1)
+	p.local, err = machinesim.StartLocalServer(loopback, d.cfg.postMatch)
+	if err != nil {
+		return nil, fmt.Errorf("start %s's local server: %w", p.name, err)
+	}
+	p.machine, err = machinesim.ConnectMachine(p.local.EndpointURL(), machine)
 	if err != nil {
 		p.local.Close()
 		return nil, err
