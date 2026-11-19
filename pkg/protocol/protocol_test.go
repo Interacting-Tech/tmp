@@ -355,3 +355,29 @@ func BenchmarkParseServerMessage(b *testing.B) {
 		_, _ = protocol.ParseServerMessage(frame, "abc123", 86400120, true)
 	}
 }
+
+func TestAppendOpponentEnvelope_IsTheMachineEnvelopePlusTheServerFields(t *testing.T) {
+	telemetry := &protocol.MachineTelemetry{
+		MACAddress: "AA:BB:CC:DD:EE:FF", PlayerID: "player-1", Hand: "left", MultiplayerState: protocol.StateRun,
+		MachineTorque: -12.5, Position: -3.1, TimeStamp: 123,
+		ExtraFields: map[string]json.RawMessage{"firmware": json.RawMessage(`"1.2"`)},
+	}
+	got := string(protocol.AppendOpponentEnvelope(nil, telemetry, 7, 86400123))
+
+	plain := string(protocol.MarshalMachineEnvelope(telemetry, true, ""))
+	want := strings.TrimSuffix(plain, "}}") + `,"is_connected":true,"client_id":7,"last_message_timestamp":86400123}}`
+	if got != want {
+		t.Fatalf("opponent envelope\n got: %s\nwant: %s", got, want)
+	}
+
+	// A machine's own PROTOCOL.md parser (ours) reads it back as connected rival telemetry.
+	parsed, ok := protocol.ParseServerMessage([]byte(got), "", 0, false)
+	if !ok || parsed.Telemetry == nil || !parsed.Telemetry.HasMachineTelemetry || !parsed.Telemetry.IsConnected ||
+		parsed.Telemetry.ClientID != 7 || parsed.Telemetry.LastMessageTimestamp != 86400123 {
+		t.Fatalf("opponent envelope did not parse as connected rival telemetry: %+v", parsed)
+	}
+
+	if got := string(protocol.AppendOpponentEnvelope(nil, nil, 7, 1)); got != `{"data":{}}` {
+		t.Fatalf("opponent envelope without telemetry = %s, want {\"data\":{}}", got)
+	}
+}

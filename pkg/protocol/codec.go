@@ -112,6 +112,22 @@ func AppendMachineEnvelope(
 	return dst
 }
 
+// AppendOpponentEnvelope appends t as a server sends it to the opponent (PROTOCOL.md section
+// 6.1): the section 3.1 envelope followed by the three fields a server adds (section 4.2).
+// lastMessageTimestamp is the server's monotonic time in milliseconds when t was received.
+func AppendOpponentEnvelope(dst []byte, t *MachineTelemetry, clientID int, lastMessageTimestamp int64) []byte {
+	if t == nil {
+		return append(dst, `{"data":{}}`...)
+	}
+	dst = AppendMachineEnvelope(dst, t, true, "")
+	dst = dst[:len(dst)-len("}}")]
+	dst = append(dst, `,"is_connected":true,"client_id":`...)
+	dst = strconv.AppendInt(dst, int64(clientID), 10)
+	dst = append(dst, `,"last_message_timestamp":`...)
+	dst = strconv.AppendInt(dst, lastMessageTimestamp, 10)
+	return append(dst, "}}"...)
+}
+
 // MarshalMachineEnvelope serializes t into a new byte slice containing {"data":{...}}.
 func MarshalMachineEnvelope(
 	t *MachineTelemetry,

@@ -1,11 +1,15 @@
-// Package battleserver is our central server. Machine bridges connect to it over WebSocket; it
-// pairs machines into battles and relays each machine's PROTOCOL.md telemetry to its rival.
+// Package battleserver is our central server. It pairs machines into battles and relays each
+// machine's PROTOCOL.md telemetry to its rival. A machine reaches it in one of two ways:
 //
-// Each machine's local PROTOCOL.md server, where the bridge stands in for the rival, tells its
-// machine when to start and whether it won. This server follows the same match states
-// (PROTOCOL.md section 5) for each pair so that it can decide a battle itself: when a handle
-// reaches one of its position limits, the server reports the winner as having won and the loser as
-// having lost, and the local servers pass that on to their machines.
+//   - Directly (MachineHandler): the machine connects to this server as it would to a PROTOCOL.md
+//     server. This server sends it the rival's telemetry every 10 ms and the START, YOU_WIN and
+//     YOU_LOSE commands.
+//   - Through a machine bridge (the Server itself as a handler): the machine stays connected to
+//     its local PROTOCOL.md server, where the bridge stands in for the rival, and that local
+//     server sends the commands.
+//
+// Either way this server follows the PROTOCOL.md section 5 match states for each pair and decides
+// a battle itself when a handle reaches one of its position limits.
 package battleserver
 
 import (
@@ -27,8 +31,16 @@ const MachineIDHeader = "X-Machine-ID"
 
 const maxMachineIDLen = 128
 
-// rivalGone is what a bridge receives when its machine has no rival (PROTOCOL.md section 6.1).
+// rivalGone is what a machine or bridge receives while it has no rival (PROTOCOL.md section 6.1).
 var rivalGone = []byte(`{"data":{}}`)
+
+// The PROTOCOL.md section 6.2 commands sent to machines that are connected directly. The numbers
+// carry no meaning; they are ones the document shows for each command.
+var (
+	cmdStart   = []byte(`{"cmd":{"START":1}}`)
+	cmdYouWin  = []byte(`{"cmd":{"YOU_WIN":0}}`)
+	cmdYouLose = []byte(`{"cmd":{"YOU_LOSE":1}}`)
+)
 
 // Options configures a Server.
 type Options struct {
@@ -36,9 +48,19 @@ type Options struct {
 	// When empty, any client may connect.
 	AuthToken string
 
-	// IdleTimeout drops a bridge that sends neither telemetry nor WebSocket pings for this long
-	// (default: 30s; bridges ping every 10s).
+	// IdleTimeout drops a connection that sends neither telemetry nor WebSocket pings for this
+	// long (default: 30s; bridges ping every 10s).
 	IdleTimeout time.Duration
+
+	// SendInterval is how often a directly connected machine is sent its rival's telemetry
+	// (default: 10ms, as in PROTOCOL.md section 6.1).
+	SendInterval time.Duration
+
+	// RivalTimeout is how long a directly connected machine may stay silent before its rival is
+	// shown no rival and their battle is abandoned, so a handle never keeps reflecting a frozen
+	// rival (default: 1s; negative disables, which is what PROTOCOL.md section 4.4 describes).
+	// For machines behind bridges, the bridge's own rival timeout does this.
+	RivalTimeout time.Duration
 
 	// WriteTimeout bounds each WebSocket write to a bridge (default: 2s).
 	WriteTimeout time.Duration
@@ -64,6 +86,12 @@ func (o Options) withDefaults() Options {
 	if out.IdleTimeout <= 0 {
 		out.IdleTimeout = 30 * time.Second
 	}
+	if out.SendInterval <= 0 {
+		out.SendInterval = 10 * time.Millisecond
+	}
+	if out.RivalTimeout == 0 {
+		out.RivalTimeout = time.Second
+	}
 	if out.WriteTimeout <= 0 {
 		out.WriteTimeout = 2 * time.Second
 	}
@@ -79,34 +107,48 @@ func (o Options) withDefaults() Options {
 	return out
 }
 
-// Server is an http.Handler for the WebSocket endpoint that machine bridges connect to.
+// Server is an http.Handler for the WebSocket endpoint that machine bridges connect to. Its
+// MachineHandler is the endpoint for machines that connect directly.
 type Server struct {
 	opts     Options
 	upgrader websocket.Upgrader
 	now      func() time.Time
+	started  time.Time
 
-	mu        sync.Mutex
-	closed    bool
-	machines  map[string]*machine
-	waiting   []*machine
-	anonymous uint64
-	scratch   []byte
-	sessions  sync.WaitGroup
+	mu          sync.Mutex
+	closed      bool
+	machines    map[machineKey]*machine
+	waiting     []*machine
+	anonymous   uint64
+	connections int
+	scratch     []byte
+	sessions    sync.WaitGroup
+}
+
+type machineKey struct {
+	direct bool
+	id     string
 }
 
 type machine struct {
-	id   string
-	ws   *websocket.Conn
-	out  outbox
-	done chan struct{}
+	id string
+	// direct is true for a machine connected to this server itself, false for a machine bridge.
+	direct bool
+	// clientID is this server's connection number, sent to a direct rival as "client_id".
+	clientID int
+	ws       *websocket.Conn
+	out      outbox
+	done     chan struct{}
 
 	// Guarded by Server.mu.
-	gone   bool
-	rival  *machine
-	battle *battle
-	// last is the machine's newest telemetry in its current battle, nil while the bridge has not
-	// sent any or has reported its machine gone.
-	last *protocol.MachineTelemetry
+	gone       bool
+	identified bool
+	rival      *machine
+	battle     *battle
+	// last is the machine's newest telemetry in its current battle, nil while it has not sent
+	// any or its machine is gone. lastAt is when it arrived.
+	last   *protocol.MachineTelemetry
+	lastAt time.Time
 	// declared is the result this server decided for the machine. While set it replaces
 	// multiplayer_state in what the rival receives.
 	declared string
@@ -126,7 +168,8 @@ func New(opts Options) *Server {
 		opts:     opts.withDefaults(),
 		upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096},
 		now:      time.Now,
-		machines: make(map[string]*machine),
+		started:  time.Now(),
+		machines: make(map[machineKey]*machine),
 	}
 }
 
@@ -141,35 +184,74 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, MachineIDHeader+" is too long", http.StatusBadRequest)
 		return
 	}
+	s.serve(w, r, &machine{id: id})
+}
 
-	ws, err := s.upgrader.Upgrade(w, r, nil)
+// MachineHandler is the endpoint for machines that connect to this server directly, the way
+// PROTOCOL.md section 2 describes: ws://<server>:<port>/ws?role=machine. As in PROTOCOL.md there
+// is no authentication, so Options.AuthToken does not apply to it.
+func (s *Server) MachineHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("role") != "machine" {
+			http.Error(w, "connect with ?role=machine", http.StatusBadRequest)
+			return
+		}
+		s.serve(w, r, &machine{direct: true})
+	})
+}
+
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, m *machine) {
+	upgrader := s.upgrader
+	if m.direct {
+		// Machine firmware is not a browser; some WebSocket client libraries send an Origin
+		// header that does not match the server, which the default check would refuse.
+		upgrader.CheckOrigin = func(*http.Request) bool { return true }
+	}
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	m := &machine{id: id, ws: ws, done: make(chan struct{})}
+	m.ws = ws
+	m.done = make(chan struct{})
 	m.out.wake = make(chan struct{}, 1)
 
-	if !s.join(m) {
+	if !s.join(m, remoteHost(r)) {
 		_ = ws.Close()
 		return
 	}
 	defer s.sessions.Done()
 
-	writerDone := make(chan struct{})
+	var loops sync.WaitGroup
+	loops.Add(1)
 	go func() {
-		defer close(writerDone)
+		defer loops.Done()
 		m.writeLoop(s.opts.WriteTimeout)
 	}()
+	if m.direct {
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			s.feedLoop(m)
+		}()
+	}
 
 	s.readLoop(m)
 
 	s.leave(m)
 	close(m.done)
 	_ = ws.Close()
-	<-writerDone
+	loops.Wait()
 }
 
-// Close disconnects every bridge and rejects new ones.
+func remoteHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// Close disconnects every machine and bridge and rejects new ones.
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
@@ -193,30 +275,44 @@ func (s *Server) authorized(r *http.Request) bool {
 	return ok && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.opts.AuthToken)) == 1
 }
 
-func (s *Server) join(m *machine) bool {
+func (s *Server) join(m *machine, remoteHost string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return false
 	}
 
-	if m.id == "" {
+	s.connections++
+	m.clientID = s.connections
+	switch {
+	case m.direct:
+		// PROTOCOL.md machines do not identify themselves when they connect.
+		m.id = fmt.Sprintf("machine-%d", m.clientID)
+	case m.id == "":
 		s.anonymous++
 		m.id = fmt.Sprintf("anonymous-%d", s.anonymous)
 	}
 	// A bridge that reconnects before its old connection is known to be dead takes its place.
-	if old := s.machines[m.id]; old != nil {
+	if old := s.machines[m.key()]; old != nil {
 		s.opts.Logf("machine %q reconnected; closing its previous connection", m.id)
 		s.detachLocked(old)
 		_ = old.ws.Close()
 	}
 
-	s.machines[m.id] = m
+	s.machines[m.key()] = m
 	s.waiting = append(s.waiting, m)
 	s.sessions.Add(1)
-	s.opts.Logf("machine %q connected (%d connected)", m.id, len(s.machines))
+	if m.direct {
+		s.opts.Logf("machine %q connected directly from %s (%d connected)", m.id, remoteHost, len(s.machines))
+	} else {
+		s.opts.Logf("machine %q connected (%d connected)", m.id, len(s.machines))
+	}
 	s.pairWaitingLocked()
 	return true
+}
+
+func (m *machine) key() machineKey {
+	return machineKey{direct: m.direct, id: m.id}
 }
 
 func (s *Server) leave(m *machine) {
@@ -236,8 +332,8 @@ func (s *Server) detachLocked(m *machine) {
 		return
 	}
 	m.gone = true
-	if s.machines[m.id] == m {
-		delete(s.machines, m.id)
+	if s.machines[m.key()] == m {
+		delete(s.machines, m.key())
 	}
 
 	if rival := m.rival; rival != nil {
@@ -260,14 +356,32 @@ func (s *Server) detachLocked(m *machine) {
 // pairWaitingLocked decides who fights whom. Stage 1: machines without a rival are paired in the
 // order they became free, and a pair stays together until one of them disconnects.
 func (s *Server) pairWaitingLocked() {
-	for len(s.waiting) >= 2 {
-		a, b := s.waiting[0], s.waiting[1]
-		s.waiting = s.waiting[2:]
+	for {
+		a, b := s.takePairLocked()
+		if a == nil {
+			return
+		}
 		a.rival, b.rival = b, a
 		bt := &battle{state: protocol.ServerIdle}
 		a.battle, b.battle = bt, bt
 		s.opts.Logf("paired %q with %q", a.id, b.id)
 	}
+}
+
+// takePairLocked removes and returns the two longest-waiting machines that can battle each other.
+// A directly connected machine and one behind a bridge cannot: the bridge's local server applies
+// its own torque sign rule and sends its own commands.
+func (s *Server) takePairLocked() (a, b *machine) {
+	for i, first := range s.waiting {
+		for j := i + 1; j < len(s.waiting); j++ {
+			if second := s.waiting[j]; second.direct == first.direct {
+				s.waiting = append(s.waiting[:j], s.waiting[j+1:]...)
+				s.waiting = append(s.waiting[:i], s.waiting[i+1:]...)
+				return first, second
+			}
+		}
+	}
+	return nil, nil
 }
 
 func (m *machine) leaveBattle() {
@@ -301,20 +415,28 @@ func (s *Server) readLoop(m *machine) {
 	}
 }
 
-// handleFrame relays one frame from m's bridge to m's rival. Only telemetry and "my machine is
-// gone" frames are relayed, re-serialized, so a bridge can never make this server send its rival
-// a command or anything this server did not understand.
+// handleFrame takes one frame from m. Only telemetry and "my machine is gone" frames are used,
+// and telemetry is re-serialized for the rival, so a connection can never make this server send
+// its rival a command or anything this server did not understand.
 func (s *Server) handleFrame(m *machine, raw []byte) {
 	if telemetry, ok := protocol.ParseRivalEnvelope(raw); ok && telemetry != nil {
 		s.mu.Lock()
+		if m.direct && !m.identified {
+			m.identified = true
+			s.opts.Logf("machine %q is MAC_address %q, player %q, %s hand",
+				m.id, telemetry.MACAddress, telemetry.PlayerID, handName(telemetry.Hand))
+		}
 		if m.rival != nil {
 			previousState := ""
 			if m.last != nil {
 				previousState = m.last.MultiplayerState
 			}
-			m.last = telemetry
+			m.last, m.lastAt = telemetry, s.now()
 			s.advanceBattleLocked(m, previousState)
-			s.relayLocked(m)
+			// A directly connected rival is sent m's newest telemetry by its own feedLoop.
+			if !m.direct {
+				s.relayLocked(m)
+			}
 		}
 		s.mu.Unlock()
 		return
@@ -327,16 +449,24 @@ func (s *Server) handleFrame(m *machine, raw []byte) {
 	}
 
 	s.mu.Lock()
-	if rival := m.rival; rival != nil {
-		m.last, m.relayedState = nil, ""
-		if m.battle.state != protocol.ServerIdle {
-			s.opts.Logf("battle between %q and %q abandoned: machine %q is gone", m.id, rival.id, m.id)
-		}
-		m.battle.state = protocol.ServerIdle
-		m.declared, rival.declared = "", ""
-		rival.out.putPriority(rivalGone)
-	}
+	s.machineGoneLocked(m, "is gone")
 	s.mu.Unlock()
+}
+
+// machineGoneLocked records that m's machine is gone while m's connection stays: its rival is
+// shown no rival and their battle is abandoned. The rival reappears with m's next telemetry.
+func (s *Server) machineGoneLocked(m *machine, why string) {
+	rival := m.rival
+	if rival == nil {
+		return
+	}
+	m.last, m.relayedState = nil, ""
+	if m.battle.state != protocol.ServerIdle {
+		s.opts.Logf("battle between %q and %q abandoned: machine %q %s", m.id, rival.id, m.id, why)
+	}
+	m.battle.state = protocol.ServerIdle
+	m.declared, rival.declared = "", ""
+	rival.out.putPriority(rivalGone)
 }
 
 // advanceBattleLocked runs the PROTOCOL.md section 5 match states for m's battle on m's newest
@@ -370,6 +500,10 @@ func (s *Server) advanceBattleLocked(m *machine, previousState string) {
 		if b.state == protocol.ServerWaiting && mine == protocol.StateReady && theirs == protocol.StateReady {
 			b.state = protocol.ServerMidMatch
 			s.opts.Logf("battle started: %q vs %q", m.id, rival.id)
+			if m.direct {
+				m.out.putPriority(cmdStart)
+				rival.out.putPriority(cmdStart)
+			}
 		}
 
 	case protocol.ServerMidMatch:
@@ -377,6 +511,15 @@ func (s *Server) advanceBattleLocked(m *machine, previousState string) {
 			b.state = protocol.ServerPostMatch
 			b.postMatchUntil = now.Add(s.opts.PostMatchDuration)
 			s.opts.Logf("battle decided: %q reported %s", m.id, mine)
+			// Only the rival of the reporting machine is told (PROTOCOL.md section 6.2). A rival
+			// behind a bridge is told by its local server, from the relayed state.
+			if m.direct {
+				if mine == protocol.StateGameOverWin {
+					rival.out.putPriority(cmdYouLose)
+				} else {
+					rival.out.putPriority(cmdYouWin)
+				}
+			}
 			return
 		}
 		// The handle may be anywhere before the machines are told to start, so a limit only
@@ -392,12 +535,19 @@ func (s *Server) advanceBattleLocked(m *machine, previousState string) {
 		if !won {
 			winner, loser = rival, m
 		}
-		winner.declared, loser.declared = protocol.StateGameOverWin, protocol.StateGameOverLose
 		b.state = protocol.ServerPostMatch
 		b.postMatchUntil = now.Add(s.opts.PostMatchDuration)
 		s.opts.Logf("battle decided: %q (%s hand) reached its %s at position %v: %q wins, %q loses",
 			m.id, handName(m.last.Hand), limit, m.last.Position, winner.id, loser.id)
 
+		if m.direct {
+			winner.out.putPriority(cmdYouWin)
+			loser.out.putPriority(cmdYouLose)
+			return
+		}
+		// Bridges: each local server tells its machine the result when it sees the rival report
+		// the opposite one.
+		winner.declared, loser.declared = protocol.StateGameOverWin, protocol.StateGameOverLose
 		// m's bridge learns the result from the rival's telemetry; do not wait for its next frame.
 		if rival.last != nil {
 			s.relayLocked(rival)
@@ -432,17 +582,55 @@ func handName(hand string) string {
 	return protocol.HandRight
 }
 
-// relayLocked sends m's newest telemetry to its rival.
+// forRival returns t as the rival receives it: a left-handed player's torque has its sign reversed.
+func forRival(t *protocol.MachineTelemetry) protocol.MachineTelemetry {
+	out := *t
+	if protocol.NormalizeHand(out.Hand) == protocol.HandLeft {
+		out.MachineTorque = protocol.SanitizeFloat(-out.MachineTorque)
+	}
+	return out
+}
+
+// feedLoop sends a directly connected machine its rival's telemetry every SendInterval, whether
+// or not the rival has sent anything new (PROTOCOL.md section 6.1).
+func (s *Server) feedLoop(m *machine) {
+	ticker := time.NewTicker(s.opts.SendInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			s.feedLocked(m)
+			s.mu.Unlock()
+		}
+	}
+}
+
+func (s *Server) feedLocked(m *machine) {
+	rival := m.rival
+	if rival != nil && rival.last != nil && s.opts.RivalTimeout > 0 && s.now().Sub(rival.lastAt) > s.opts.RivalTimeout {
+		s.opts.Logf("machine %q has sent nothing for %v; %q is shown no rival until it does", rival.id, s.opts.RivalTimeout, m.id)
+		s.machineGoneLocked(rival, "stopped sending")
+		return
+	}
+	if rival == nil || rival.last == nil {
+		m.out.putLatest(rivalGone)
+		return
+	}
+	out := forRival(rival.last)
+	s.scratch = protocol.AppendOpponentEnvelope(s.scratch[:0], &out, rival.clientID, rival.lastAt.Sub(s.started).Milliseconds())
+	m.out.putLatest(s.scratch)
+}
+
+// relayLocked sends m's newest telemetry to its rival's bridge.
 func (s *Server) relayLocked(m *machine) {
-	out := *m.last
+	out := forRival(m.last)
 	if m.declared != "" {
 		out.MultiplayerState = m.declared
 	} else if s.heldReadyLocked(m) {
 		out.MultiplayerState = protocol.StateReady
-	}
-	// The rival receives a left-handed player's torque with its sign reversed.
-	if protocol.NormalizeHand(out.Hand) == protocol.HandLeft {
-		out.MachineTorque = protocol.SanitizeFloat(-out.MachineTorque)
 	}
 
 	// A win/lose result must reach the rival even if it is slow to read; everything else is
@@ -490,9 +678,10 @@ func (m *machine) writeLoop(writeTimeout time.Duration) {
 	}
 }
 
-// outbox holds the frames waiting to be written to one bridge. Telemetry is latest-wins, so a slow
-// or stalled bridge never builds a backlog of stale rival positions. Priority frames (a win/lose
-// result, the rival leaving) are queued in order and are never replaced by telemetry.
+// outbox holds the frames waiting to be written to one connection. Telemetry is latest-wins, so a
+// slow or stalled connection never builds a backlog of stale rival positions. Priority frames (a
+// command, a win/lose result, the rival leaving) are queued in order and are never replaced by
+// telemetry.
 type outbox struct {
 	mu        sync.Mutex
 	latest    []byte
