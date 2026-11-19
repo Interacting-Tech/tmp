@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 // machineTorqueFrame is a machine's frame as relayed by a server

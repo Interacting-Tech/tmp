@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/machineclient"
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/machineclient"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 var bridgeMarshalPool = sync.Pool{

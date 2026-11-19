@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/Interacting-Tech/tmp/pkg/netutil"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/netutil"
 )
 
 func TestResolveMachineIP_FindsLocalHostAddressAndBuildsProtocolURL(t *testing.T) {

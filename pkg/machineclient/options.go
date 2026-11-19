@@ -3,7 +3,7 @@ package machineclient
 import (
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 // Options configures a Client connecting to the local arm-wrestling server per PROTOCOL.md.

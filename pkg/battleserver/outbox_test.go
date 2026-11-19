@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 // pendingFor returns what a bridge that has not read anything yet would be sent, in order.

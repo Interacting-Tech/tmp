@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/battleserver"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/battleserver"
 )
 
 func main() {

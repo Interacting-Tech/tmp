@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
 

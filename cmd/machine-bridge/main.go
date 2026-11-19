@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/bridge"
-	"github.com/Interacting-Tech/tmp/pkg/machineclient"
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/bridge"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/machineclient"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/machinesim"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/machinesim"
 )
 
 type simulatedMachineServer = machinesim.LocalServer

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Interacting-Tech/tmp/pkg/protocol"
+	"dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling/pkg/protocol"
 )
 
 // handle describes one machine's telemetry frame. Limits are -45 and 45 unless noLimits is set.

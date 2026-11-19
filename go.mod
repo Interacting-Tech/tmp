@@ -1,4 +1,4 @@
-module github.com/Interacting-Tech/tmp
+module dev.azure.com/InteractingTechnologies/Glenfiddich/_git/Arm-Wrestling
 
 go 1.22.2
 
